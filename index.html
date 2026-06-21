@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-<title>Chillroom — nighttime vibe</title>
+<title>Man Cave — nighttime vibe</title>
 <style>
   :root { --paper:#eae6f0; --accent:#7cd1ff; }
   * { margin:0; padding:0; box-sizing:border-box; }
@@ -47,6 +47,15 @@
     text-transform:uppercase; transition:opacity .5s; }
   #loader.gone { opacity:0; pointer-events:none; }
 </style>
+<script>
+  window.addEventListener("error", function(e){
+    var l=document.getElementById("loader");
+    if(l && !l.classList.contains("gone")){
+      l.textContent = "⚠ " + ((e && e.message) || "load error");
+      l.style.cssText += ";font-size:11px;padding:24px;text-align:center;line-height:1.6";
+    }
+  });
+</script>
 </head>
 <body>
   <div id="loader">setting the mood…</div>
@@ -69,7 +78,6 @@
   <audio id="aud" crossorigin="anonymous" style="display:none"></audio>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/renderers/CSS3DRenderer.js" onerror="window.__noCSS3D=1"></script>
   <script>
   (function () {
     "use strict";
@@ -104,9 +112,28 @@
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     document.body.appendChild(renderer.domElement);
 
-    // CSS3D layer (for streaming iframes mapped onto the TV); degrades gracefully if the addon didn't load
+    // CSS3D layer (streaming iframes + live site on the monitor). Loaded ASYNC so it can never block the room.
     let cssRenderer=null, cssScene=null, tvObject=null;
-    if (THREE.CSS3DRenderer && !window.__noCSS3D){
+    function initCSS3D(){
+      if(!THREE.CSS3DRenderer || cssRenderer) return;
+      cssScene = new THREE.Scene();
+      cssRenderer = new THREE.CSS3DRenderer();
+      cssRenderer.setSize(window.innerWidth, window.innerHeight);
+      const cd=cssRenderer.domElement;
+      cd.style.position="absolute"; cd.style.top="0"; cd.style.left="0";
+      cd.style.zIndex="1"; cd.style.pointerEvents="none";
+      document.body.appendChild(cd);
+      const rc=renderer.domElement.style;
+      rc.position="absolute"; rc.top="0"; rc.left="0"; rc.zIndex="0";
+      mountMonitorSite();
+    }
+    (function loadCSS3D(){
+      const s=document.createElement("script");
+      s.src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/renderers/CSS3DRenderer.js";
+      s.onload=function(){ try{ initCSS3D(); }catch(e){} };
+      document.head.appendChild(s);
+    })();
+    if (false){
       cssScene = new THREE.Scene();
       cssRenderer = new THREE.CSS3DRenderer();
       cssRenderer.setSize(window.innerWidth, window.innerHeight);
@@ -534,8 +561,8 @@
       else if(a==="proj") openProject(hit.object);
     }
 
-    // load the live JT Creations site onto the monitor (in-world iframe)
-    (function mountMonitorSite(){
+    // load the live JT Creations site onto the monitor (in-world iframe); called once CSS3D is ready
+    function mountMonitorSite(){
       if(!cssRenderer || !STUDIO.monitorLive || !STUDIO.site) return;
       const wrap=document.createElement("div");
       wrap.style.width="1024px"; wrap.style.height="576px"; wrap.style.overflow="hidden"; wrap.style.background="#0b0d14";
@@ -546,7 +573,7 @@
       const s=1.82/1024; obj.scale.set(s,s,s);
       obj.position.set(4.4,2.6,-4.33);   // on the monitor face
       cssScene.add(obj);
-    })();
+    }
 
     // ---------- controls ----------
     const cam={yaw:Math.PI,pitch:-0.05}, keys={};
