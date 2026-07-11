@@ -1057,7 +1057,7 @@ const arcade = (function () {
      seeded simulation from the identical input stream. If an input hasn't landed
      yet, we stall rather than guess, so we can never drift apart.
      ==================================================== */
-  const DELAY = 8;          // frames of input delay (~133ms) — split evenly, so it's fair
+  const DELAY = 10;         // frames of input delay (~166ms) — split evenly, so it's fair
   const BATCH = 4;          // send 4 frames of input per packet: 15 packets/sec, not 60
 
   const NETC = {
@@ -1075,9 +1075,11 @@ const arcade = (function () {
   let frame = 0, acc = 0, running = false, stalled = false;
   const buf = [new Map(), new Map()];   // per-player: frame -> bits
   let prevBits = [0, 0];
-  let lastSent = -1, pending = [];      // batching
+  let lastSent = -1, pending = [], pendStart = 0;
+  let localOnly = false;                // playing before/without a relay connection
 
   function myIndex() {
+    if (localOnly) return 0;              // relay is down: the cabinet is yours, play on
     if (!NET || !NET.id) return -1;
     if (NETC.seat === NET.id) return 0;
     if (NETC.p2 === NET.id)   return 1;
@@ -1103,28 +1105,37 @@ const arcade = (function () {
     game = games[gi];
     game.reset();
     frame = 0; acc = 0; running = true; stalled = false;
+
     buf[0].clear(); buf[1].clear();
+    // PREFILL THE DELAY WINDOW. Frame 0 needs input for frame 0, but the first
+    // input we can schedule is for frame DELAY. Without this the sim waits forever
+    // for keystrokes that were never going to exist.
+    for (let f = 0; f < DELAY; f++) { buf[0].set(f, 0); buf[1].set(f, 0); }
+
     prevBits = [0, 0];
-    lastSent = -1; pending = [];
+    lastSent = DELAY - 1;
+    pending = []; pendStart = 0;
     view = "game";
   }
 
   function endGame() {
     running = false;
+    flushInput();                       // don't strand the last few frames of input
     const s = game ? game.score() : 0;
     const i = myIndex();
-    // only the player who was actually playing reports the score
+    if (localOnly) return;
     if (i >= 0 && iAmPlaying()) NET.send({ t: "cab_score", i: i, g: game.name, s: s });
   }
 
-  function pushInput(bits) {
-    const target = frame + DELAY;
+  function pushInput(target, bits) {
+    if (pending.length === 0) pendStart = target;
     pending.push(bits);
-    if (pending.length >= BATCH) {
-      const start = target - pending.length + 1;
-      NET.send({ t: "cab_in", f: start, b: pending.slice() });
-      pending = [];
-    }
+    if (pending.length >= BATCH) { flushInput(); }
+  }
+  function flushInput() {
+    if (!pending.length || localOnly) { pending = []; return; }
+    NET.send({ t: "cab_in", f: pendStart, b: pending.slice() });
+    pending = [];
   }
 
   // record inputs arriving from the wire (or from ourselves)
@@ -1157,12 +1168,13 @@ const arcade = (function () {
     }
     if (NETC.p2) {
       const g = games[sel];
-      const label = g.twoPlayer ? "VERSUS" : "MATCH \u2014 same board, high score";
-      center(NETC.names[1] + " is in \u00b7 Enter = " + label, H - 30, 12, "#ffe24e");
-      center("J \u2014 drop them out", H - 14, 11, "rgba(200,220,255,0.45)");
+      const label = g.twoPlayer ? "VERSUS" : "MATCH \u2014 same board";
+      center(NETC.names[1].toUpperCase() + " WANTS IN", H - 42, 13, "#ffe24e");
+      center("Enter \u2014 play solo anyway   \u00b7   V \u2014 " + label, H - 26, 12, "#7cffd0");
+      center("J \u2014 send them away", H - 11, 10, "rgba(200,220,255,0.4)");
     } else {
-      center("Enter play \u00b7 Esc stand up", H - 26, 12, "rgba(200,220,255,0.55)");
-      center("someone else can press J at the cabinet to challenge you", H - 12, 10, "rgba(200,220,255,0.35)");
+      center("Enter \u2014 play \u00b7 Esc \u2014 stand up", H - 26, 12, "rgba(200,220,255,0.55)");
+      center("someone can press J to challenge you", H - 11, 10, "rgba(200,220,255,0.35)");
     }
   }
 
@@ -1232,7 +1244,8 @@ const arcade = (function () {
     if (NETC.seat && NETC.seat !== NET.id) { spectate(); return; }
     active = true; view = "menu"; sel = 0;
     seatProg.copy(camera.position);
-    NET.send({ t: "cab_sit" });
+    localOnly = !(NET && NET.id);        // no relay? fine. play by yourself.
+    if (!localOnly) NET.send({ t: "cab_sit" });
     status("ARCADE \u00b7 \u2191/\u2193 pick \u00b7 Enter play \u00b7 Esc stand up");
   }
   function spectate() {
@@ -1263,10 +1276,21 @@ const arcade = (function () {
       if (k === "arrowup" || k === "w") sel = (sel + games.length - 1) % games.length;
       else if (k === "arrowdown" || k === "s") sel = (sel + 1) % games.length;
       else if (k === "enter") {
+        // ENTER is ALWAYS solo. you never get dragged into a match you didn't pick.
+        const seed = (Math.random() * 0xffffffff) >>> 0;
+        if (localOnly) { startGame(sel, seed, "solo", 0); return; }
+        NET.send({ t: "cab_start", g: sel, seed: seed, mode: "solo" });
+      }
+      else if (k === "v" && NETC.p2) {
+        // V takes on the challenger
         const g = games[sel];
-        const mode = !NETC.p2 ? "solo" : (g.twoPlayer ? "versus" : "match");
-        NET.send({ t: "cab_start", g: sel, seed: (Math.random() * 0xffffffff) >>> 0, mode: mode });
-      } else if (k === "escape") stand();
+        NET.send({
+          t: "cab_start", g: sel,
+          seed: (Math.random() * 0xffffffff) >>> 0,
+          mode: g.twoPlayer ? "versus" : "match"
+        });
+      }
+      else if (k === "escape") stand();
       return;
     }
 
@@ -1288,6 +1312,7 @@ const arcade = (function () {
         }
         return;
       }
+      if (localOnly) { startGame(NETC.gi, (Math.random() * 0xffffffff) >>> 0, "solo", 0); return; }
       if (iAmSeat) NET.send({ t: "cab_start", g: NETC.gi, seed: (Math.random() * 0xffffffff) >>> 0, mode: NETC.mode });
       return;
     }
@@ -1304,7 +1329,7 @@ const arcade = (function () {
       const pi = myIndex();
       if (target > lastSent) {
         buf[pi].set(target, bits);
-        pushInput(bits);
+        pushInput(target, bits);
         lastSent = target;
       }
     }
@@ -1420,6 +1445,50 @@ const arcade = (function () {
 
     const CINEMATIC = true;   // false if the film grade looks washed out on your monitor
 
+    /* ============================================================
+       LOOK — every color in the room, in one place. Change these,
+       don't go hunting through the code.
+
+       Lighting is what was making everything red: a 13-unit point
+       light behind the TV was cycling through the whole hue wheel.
+       biasCycle:false pins it. Turn it back on if you want the rave.
+       ============================================================ */
+    const LOOK = {
+      wall:        0x0b0b0e,   // near-black, a hair cool
+      fog:         0x07070a,
+      ambientSky:  0x1a1f2b,   // hemisphere light — tints EVERYTHING, keep it neutral
+      ambientFloor:0x050609,
+      ambientPower: 0.30,
+      moonlight:   0x8fa8ff,
+      moonPower:    0.32,
+
+      rug:         0x15161b,
+      rugTrim:     0x212329,
+
+      table:       0x24211d,
+      tableLeg:    0x191714,
+
+      beanbagA:    0x23252c,
+      beanbagB:    0x212831,
+      beanbagC:    0x232a26,
+      pillowA:     0x272930,
+      pillowB:     0x2c2e35,
+      throwA:      0x343740,
+      throwB:      0x3d323a,
+      blanket:     0x33303a,
+      planter:     0x2a2521,
+
+      // the warm accents — this is where "cozy" comes from now, not from the paint
+      bias:        0x4a3aa8,   // LED strip behind the TV
+      biasCycle:   false,      // <-- the thing that was painting the room red
+      biasPower:    0.55,
+      fairy:       0xffcf8a,   // string bulbs
+      fairyPower:   0.28,
+      rim:         0xffc890,   // soft fill on the couch
+      rimPower:     0.18,
+      lavaPower:    0.26
+    };
+
     function K(rate, dt) { return 1 - Math.pow(1 - rate, dt * 60); }
     function shortAngle(from, to) {
       let d = (to - from) % (Math.PI * 2);
@@ -1440,45 +1509,45 @@ const arcade = (function () {
         });
       }
 
-      wallMat.color.set(0x17131c);
-      scene.background.set(0x120e16);
-      scene.fog.color.set(0x120e16);
+      wallMat.color.set(LOOK.wall);
+      scene.background.set(LOOK.fog);
+      scene.fog.color.set(LOOK.fog);
       scene.fog.near = 18; scene.fog.far = 44;
 
-      hemi.color.set(0x3a2f44);
-      hemi.groundColor.set(0x0d0810);
-      hemi.intensity = 0.34;
-      moon.color.set(0x8fa8ff);
-      moon.intensity = 0.30;
+      hemi.color.set(LOOK.ambientSky);
+      hemi.groundColor.set(LOOK.ambientFloor);
+      hemi.intensity = LOOK.ambientPower;
+      moon.color.set(LOOK.moonlight);
+      moon.intensity = LOOK.moonPower;
 
-      const rug2 = new THREE.Mesh(new THREE.BoxGeometry(9.6, 0.04, 7.4), toonMat(0x3d2438));
+      const rug2 = new THREE.Mesh(new THREE.BoxGeometry(9.6, 0.04, 7.4), toonMat(LOOK.rug));
       rug2.position.set(-1.2, 0.02, 1.2); rug2.receiveShadow = true; scene.add(rug2);
-      const rugTrim = new THREE.Mesh(new THREE.BoxGeometry(8.9, 0.05, 6.7), toonMat(0x5c3a54));
+      const rugTrim = new THREE.Mesh(new THREE.BoxGeometry(8.9, 0.05, 6.7), toonMat(LOOK.rugTrim));
       rugTrim.position.set(-1.2, 0.03, 1.2); scene.add(rugTrim);
 
       /* coffee table + lava lamp + mug */
-      place(prop(new THREE.BoxGeometry(2.4, 0.12, 1.1), 0x5c4433, 0.03), -1.5, 0.94, 0.75);
+      place(prop(new THREE.BoxGeometry(2.4, 0.12, 1.1), LOOK.table, 0.03), -1.5, 0.94, 0.75);
       [[-1.0,-0.42],[1.0,-0.42],[-1.0,0.42],[1.0,0.42]].forEach(function (o) {
-        place(prop(new THREE.BoxGeometry(0.1, 0.88, 0.1), 0x3f2e22, 0.06), -1.5 + o[0], 0.44, 0.75 + o[1]);
+        place(prop(new THREE.BoxGeometry(0.1, 0.88, 0.1), LOOK.tableLeg, 0.06), -1.5 + o[0], 0.44, 0.75 + o[1]);
       });
-      place(prop(new THREE.BoxGeometry(2.1, 0.06, 0.85), 0x4a3628, 0.04), -1.5, 0.36, 0.75);
+      place(prop(new THREE.BoxGeometry(2.1, 0.06, 0.85), LOOK.tableLeg, 0.04), -1.5, 0.36, 0.75);
       place(prop(new THREE.CylinderGeometry(0.16, 0.2, 0.08, 12), 0x2a2d36, 0.06), -2.3, 1.04, 0.75);
       const lava = new THREE.Mesh(
         new THREE.CylinderGeometry(0.09, 0.15, 0.55, 14),
         new THREE.MeshBasicMaterial({ color: 0xff5a7a, transparent: true, opacity: 0.9, toneMapped: false })
       );
       lava.position.set(-2.3, 1.36, 0.75); scene.add(lava);
-      const lavaLight = new THREE.PointLight(0xff5a7a, 0.5, 5, 2);
+      const lavaLight = new THREE.PointLight(0xff5a7a, LOOK.lavaPower, 4, 2);
       lavaLight.position.set(-2.3, 1.4, 0.75); scene.add(lavaLight);
       place(prop(new THREE.CylinderGeometry(0.08, 0.07, 0.14, 10), 0xd8dbe0, 0.06), -0.7, 1.07, 0.75);
 
       /* LED bias strip behind the TV */
       const bias = new THREE.Mesh(
         new THREE.PlaneGeometry(7.6, 4.6),
-        new THREE.MeshBasicMaterial({ color: 0x5a3fd6, transparent: true, opacity: 0.55, toneMapped: false })
+        new THREE.MeshBasicMaterial({ color: LOOK.bias, transparent: true, opacity: 0.5, toneMapped: false })
       );
       bias.position.set(0, 3.7, -RD / 2 + 0.17); scene.add(bias);
-      const biasLight = new THREE.PointLight(0x7a5aff, 0.9, 13, 2);
+      const biasLight = new THREE.PointLight(LOOK.bias, LOOK.biasPower, 9, 2);
       biasLight.position.set(0, 3.7, -RD / 2 + 0.9); scene.add(biasLight);
 
       /* string lights */
@@ -1499,14 +1568,14 @@ const arcade = (function () {
       stringRun(-RW/2 + 0.6, -RD/2 + 0.6, -RW/2 + 0.6,  RD/2 - 0.6, 8, 0.5);
       stringRun( RW/2 - 0.6, -RD/2 + 0.6,  RW/2 - 0.6,  RD/2 - 0.6, 8, 0.5);
 
-      const fairyA = new THREE.PointLight(0xffb870, 0.5, 11, 2);
+      const fairyA = new THREE.PointLight(LOOK.fairy, LOOK.fairyPower, 10, 2);
       fairyA.position.set(-5.5, RH - 1.0, 0); scene.add(fairyA);
-      const fairyB = new THREE.PointLight(0xffb870, 0.5, 11, 2);
+      const fairyB = new THREE.PointLight(LOOK.fairy, LOOK.fairyPower, 10, 2);
       fairyB.position.set(5.5, RH - 1.0, 0); scene.add(fairyB);
 
       /* plants */
       function plant(x, z, s) {
-        place(prop(new THREE.CylinderGeometry(0.28, 0.36, 0.55, 10), 0x8a5a3c, 0.05), x, 0.28, z);
+        place(prop(new THREE.CylinderGeometry(0.28, 0.36, 0.55, 10), LOOK.planter, 0.05), x, 0.28, z);
         place(prop(new THREE.CylinderGeometry(0.3, 0.3, 0.06, 10), 0x3a2a1e, 0.05), x, 0.56, z);
         place(prop(new THREE.CylinderGeometry(0.05, 0.07, 1.5, 6), 0x3f6b3a, 0.05), x, 1.3, z);
         for (let i = 0; i < 7; i++) {
@@ -1522,7 +1591,7 @@ const arcade = (function () {
       plant(6.2, -1.0, 0.9);
 
       /* shelf above the TV */
-      place(prop(new THREE.BoxGeometry(3.0, 0.12, 0.42), 0x5c4433, 0.03), -1.5, 6.0, -RD/2 + 0.45);
+      place(prop(new THREE.BoxGeometry(3.0, 0.12, 0.42), LOOK.table, 0.03), -1.5, 6.0, -RD/2 + 0.45);
       const bookCols = [0xff5a7a, 0xffe24e, 0x7cffd0, 0x9b8bff, 0xff8a5a, 0x5a8fd6, 0x6effa0];
       for (let i = 0; i < 9; i++) {
         const h = 0.34 + Math.random() * 0.16;
@@ -1532,20 +1601,27 @@ const arcade = (function () {
       }
       place(prop(new THREE.BoxGeometry(0.5, 0.5, 0.35), 0x1d2028, 0.05), 0.0, 6.3, -RD/2 + 0.45);
 
-      const blanket = place(prop(new THREE.BoxGeometry(0.65, 0.9, 1.7), 0xd8a05a, 0.04), -3.35, 1.45, 2.6);
+      const blanket = place(prop(new THREE.BoxGeometry(0.65, 0.9, 1.7), LOOK.blanket, 0.04), -3.35, 1.45, 2.6);
       blanket.rotation.x = 0.06;
 
-      const rim = new THREE.PointLight(0xffb066, 0.45, 10, 2);
+      const rim = new THREE.PointLight(LOOK.rim, LOOK.rimPower, 10, 2);
       rim.position.set(-1.5, 4.6, 3.4); scene.add(rim);
 
       function tick(t) {
+        // lava lamp still breathes — it's one small light, not the whole room
         const b = 0.85 + Math.sin(t * 0.9) * 0.15;
         lava.scale.set(b, 1 / b, b);
-        lavaLight.intensity = 0.42 + Math.sin(t * 0.9) * 0.12;
+        lavaLight.intensity = LOOK.lavaPower + Math.sin(t * 0.9) * 0.08;
         lava.material.color.setHSL((0.93 + Math.sin(t * 0.15) * 0.06) % 1, 0.8, 0.62);
-        bias.material.color.setHSL((t * 0.02) % 1, 0.65, 0.42);
-        biasLight.color.setHSL((t * 0.02) % 1, 0.65, 0.6);
-        biasLight.intensity = power.tv ? 0.9 : 0.25;
+
+        // THE BIAS STRIP. This used to sweep the entire hue wheel on a 13-unit
+        // light — which is what was painting your black room red.
+        if (LOOK.biasCycle) {
+          bias.material.color.setHSL((t * 0.02) % 1, 0.6, 0.42);
+          biasLight.color.setHSL((t * 0.02) % 1, 0.6, 0.55);
+        }
+        biasLight.intensity = power.tv ? LOOK.biasPower : LOOK.biasPower * 0.3;
+
         for (const bl of bulbs) {
           const f = 0.86 + Math.sin(t * 2.2 + bl.userData.phase) * 0.14;
           bl.material.color.setRGB(f, 0.81 * f, 0.54 * f);
@@ -1556,16 +1632,16 @@ const arcade = (function () {
 
     /* ---------------- SEATING FURNITURE ---------------- */
     (function buildSeating() {
-      const bagA = place(prop(new THREE.SphereGeometry(0.85, 14, 10), 0xb84a55, 0.04), -4.9, 0.48, 2.2);
+      const bagA = place(prop(new THREE.SphereGeometry(0.85, 14, 10), LOOK.beanbagA, 0.04), -4.9, 0.48, 2.2);
       bagA.scale.set(1, 0.6, 1);
-      const bagB = place(prop(new THREE.SphereGeometry(0.85, 14, 10), 0x4a6bb8, 0.04), 1.9, 0.48, 2.4);
+      const bagB = place(prop(new THREE.SphereGeometry(0.85, 14, 10), LOOK.beanbagB, 0.04), 1.9, 0.48, 2.4);
       bagB.scale.set(1, 0.6, 1);
-      const bagC = place(prop(new THREE.SphereGeometry(0.8, 14, 10), 0x5aa87a, 0.04), 3.4, 0.45, 4.2);
+      const bagC = place(prop(new THREE.SphereGeometry(0.8, 14, 10), LOOK.beanbagC, 0.04), 3.4, 0.45, 4.2);
       bagC.scale.set(1, 0.6, 1);
 
-      const p1 = place(prop(new THREE.BoxGeometry(1.2, 0.34, 1.2), 0x8a5ab8, 0.05), -3.6, 0.18, -0.9);
+      const p1 = place(prop(new THREE.BoxGeometry(1.2, 0.34, 1.2), LOOK.pillowA, 0.05), -3.6, 0.18, -0.9);
       p1.rotation.y = 0.24;
-      const p2 = place(prop(new THREE.BoxGeometry(1.2, 0.34, 1.2), 0xb8a05a, 0.05), 0.6, 0.18, -1.1);
+      const p2 = place(prop(new THREE.BoxGeometry(1.2, 0.34, 1.2), LOOK.pillowB, 0.05), 0.6, 0.18, -1.1);
       p2.rotation.y = -0.31;
 
       place(prop(new THREE.BoxGeometry(1.3, 0.75, 1.3), 0x2f5d57, 0.03), 4.3, 0.72, 1.4);
@@ -1574,9 +1650,9 @@ const arcade = (function () {
         place(prop(new THREE.BoxGeometry(0.14, 0.35, 0.14), 0x24443f, 0.06), 4.3 + o[0], 0.18, 1.4 + o[1]);
       });
 
-      const tp1 = place(prop(new THREE.BoxGeometry(0.55, 0.5, 0.2), 0xffb14e, 0.05), -3.05, 1.45, 3.05);
+      const tp1 = place(prop(new THREE.BoxGeometry(0.55, 0.5, 0.2), LOOK.throwA, 0.05), -3.05, 1.45, 3.05);
       tp1.rotation.z = 0.18;
-      const tp2 = place(prop(new THREE.BoxGeometry(0.55, 0.5, 0.2), 0xff5a7a, 0.05), 0.15, 1.45, 3.05);
+      const tp2 = place(prop(new THREE.BoxGeometry(0.55, 0.5, 0.2), LOOK.throwB, 0.05), 0.15, 1.45, 3.05);
       tp2.rotation.z = -0.14;
     })();
 
@@ -1616,7 +1692,7 @@ const arcade = (function () {
     const seatRing = new THREE.Mesh(
       new THREE.RingGeometry(0.5, 0.64, 26),
       new THREE.MeshBasicMaterial({
-        color: 0x7cd1ff, transparent: true, opacity: 0,
+        color: 0x8fb4d8, transparent: true, opacity: 0,
         side: THREE.DoubleSide, depthWrite: false, toneMapped: false
       })
     );
@@ -1972,13 +2048,20 @@ const arcade = (function () {
           return;
         }
         if (document.activeElement === nameEl) { e.stopImmediatePropagation(); return; }
-        if (arcade.active) return;   // the cabinet owns the keyboard while you're at it
 
         const k = e.key.toLowerCase();
+
+        // T ALWAYS opens chat — even at the cabinet. This check has to come BEFORE
+        // the arcade guard, or the cabinet swallows it.
         if (k === "t") {
           e.preventDefault(); e.stopImmediatePropagation();
           openChat();
-        } else if (k === "e") {
+          return;
+        }
+
+        if (arcade.active) return;   // past this point, the cabinet owns the keyboard
+
+        if (k === "e") {
           e.preventDefault(); e.stopImmediatePropagation();
           if (mySeat !== null && mySeat !== ARCADE_SEAT) toggleSeat(mySeat);
           else if (mySeat === null) {
