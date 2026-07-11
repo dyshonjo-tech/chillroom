@@ -350,11 +350,7 @@
       PCHIT.position.set(6.0,0.85,-4.2); PCHIT.userData.act="site"; scene.add(PCHIT);
       const rgb=new THREE.Mesh(new THREE.BoxGeometry(0.04,1.2,0.06),new THREE.MeshBasicMaterial({color:0x9b6bff}));
       rgb.position.set(5.66,0.9,-3.55); scene.add(rgb); RGB=rgb;
-      // chair — turned to FACE the desk (backrest now on the +z side of the seat)
-      place(prop(new THREE.BoxGeometry(1.1,0.2,1.1),0x1d1f27,0.04),4.4,1.2,-3.0);
-      place(prop(new THREE.BoxGeometry(1.1,1.3,0.2),0x1d1f27,0.04),4.4,1.9,-2.5);
-      place(prop(new THREE.CylinderGeometry(0.08,0.08,1.0,8),0x111219,0.05),4.4,0.6,-3.0);
-      place(prop(new THREE.CylinderGeometry(0.45,0.45,0.1,5),0x111219,0.05),4.4,0.08,-3.0);
+     
       // wall outlet
       place(prop(new THREE.BoxGeometry(0.05,0.5,0.35),0xd8dbe0,0.06),RW/2-0.16,1.3,-4.2);
       [-0.08,0.08].forEach(function(o){
@@ -549,7 +545,7 @@
       if(!m.userData.url){ status("add "+m.userData.name+"’s link in the CONFIG at the top"); }
       else window.open(m.userData.url,"_blank","noopener");
     }
-    function hitList(){ return [TV,MONITOR,LAMP,PCHIT].concat(posterArts); }
+    function hitList(){ return [TV,MONITOR,LAMP,PCHIT,ARCADE_SCREEN].concat(posterArts); }   // ← added ARCADE_SCREEN
     function tryClick(cx,cy){
       ndc.x=(cx/window.innerWidth)*2-1; ndc.y=-(cy/window.innerHeight)*2+1;
       ray.setFromCamera(ndc,camera);
@@ -559,6 +555,7 @@
       else if(a==="lamp") setLamp(!lampOn);
       else if(a==="site") openSite();
       else if(a==="proj") openProject(hit.object);
+      else if(a==="arcade") arcade.click();
     }
 
     // load the live JT Creations site onto the monitor (in-world iframe); called once CSS3D is ready
@@ -571,885 +568,1659 @@
       wrap.appendChild(ifr);
       const obj=new THREE.CSS3DObject(wrap);
       const s=1.82/1024; obj.scale.set(s,s,s);
-      obj.position.set(4.4,2.6,-4.33);   // on the monitor face
+      obj.position.set(4.4,2.6,-4.42);   // on the monitor face
       cssScene.add(obj);
     }
-https://www.youtube.com/watch?v=wiG4fLEztEg 
-    /* ============================================================
-   CHILLROOM  —  v2
-   multiplayer + cozy interior + a guard that tells you when
-   the frame-loop edit didn't take.
+/* ===================== JTC ARCADE — deterministic + networked =====================
+   Games are identical to before. What changed, and why:
 
-   HOW TO USE:
-     1. delete the entire v1 block from chillroom.html
-     2. paste this in its place — directly ABOVE the line
-            // ---------- controls ----------
-     3. make the two frame-loop edits at the very bottom of this file
+     · Math.random() → rnd(), a seeded PRNG. Same seed = same board, everywhere.
+     · step(dt) → step(i0,i1,e0,e1) at a FIXED 60Hz. No more physics that depends
+       on your framerate.
+     · Games no longer read keys[] directly. They read an input bitmask that the
+       netcode feeds them — which is what lets a spectator drive the same sim.
 
-   The rain, the storm and the city skyline are not touched.
-   ============================================================ */
+   Spectators don't stream video. They receive your keystrokes and re-run the
+   simulation. Cheap on the wire, pixel-identical on screen.
+   ================================================================================ */
 
-const RELAY = "wss://chillroom-relay.dyshonjo.workers.dev/ws";
+let ARCADE_SCREEN = null, arcadeGlow = null;
+const acv = document.createElement("canvas"); acv.width = 400; acv.height = 300;
+const axx = acv.getContext("2d");
+const arcadeTex = new THREE.CanvasTexture(acv);
+arcadeTex.encoding = THREE.sRGBEncoding; arcadeTex.minFilter = THREE.LinearFilter;
 
-const AV_COLORS = [
-  0x7cd1ff, 0xff5a7a, 0x7cffd0, 0xffe24e, 0xff8a5a,
-  0x9b8bff, 0x6effa0, 0xff3df0, 0x5a8fd6, 0xffb14e
-];
+/* ---------- the cabinet, in the left-wall gap between the two posters ---------- */
+(function () {
+  const CX = -6.4, CZ = -0.4, FX = -5.8;
+  place(prop(new THREE.BoxGeometry(1.0, 4.2, 1.4), 0x15171f, 0.02), CX, 2.1, CZ);
 
-// set to false if the film-style grade looks washed out on your monitor
-const CINEMATIC = true;
+  const mcv2 = document.createElement("canvas"); mcv2.width = 384; mcv2.height = 96;
+  const mg = mcv2.getContext("2d");
+  mg.fillStyle = "#0b0f1a"; mg.fillRect(0, 0, 384, 96);
+  mg.textAlign = "center";
+  mg.fillStyle = "#7cffd0"; mg.font = "700 40px ui-monospace, monospace"; mg.fillText("JTC ARCADE", 192, 50);
+  mg.fillStyle = "#ff5a7a"; mg.font = "16px ui-monospace, monospace"; mg.fillText("6 GAMES · NO QUARTERS", 192, 76);
+  const mtex = new THREE.CanvasTexture(mcv2); mtex.encoding = THREE.sRGBEncoding;
+  const marquee = new THREE.Mesh(new THREE.PlaneGeometry(1.3, 0.33),
+    new THREE.MeshBasicMaterial({ map: mtex, toneMapped: false }));
+  marquee.position.set(FX + 0.07, 3.85, CZ); marquee.rotation.y = Math.PI / 2; scene.add(marquee);
 
-// framerate-independent smoothing. rate is "how much per 60fps frame".
-function K(rate, dt) { return 1 - Math.pow(1 - rate, dt * 60); }
+  ARCADE_SCREEN = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 0.75),
+    new THREE.MeshBasicMaterial({ map: arcadeTex, toneMapped: false }));
+  ARCADE_SCREEN.position.set(FX + 0.07, 2.95, CZ);
+  ARCADE_SCREEN.rotation.y = Math.PI / 2;
+  ARCADE_SCREEN.userData.act = "arcade";
+  scene.add(ARCADE_SCREEN);
 
-function shortAngle(from, to) {
-  let d = (to - from) % (Math.PI * 2);
-  if (d > Math.PI) d -= Math.PI * 2;
-  if (d < -Math.PI) d += Math.PI * 2;
-  return d;
-}
-
-/* ============================================================
-   PART 1 — COZY PASS
-   ============================================================ */
-const COZY = (function () {
-
-  if (CINEMATIC) {
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.05;
-    // screens must not get tone-mapped or they go dull
-    [TV, MONITOR, ARCADE_SCREEN, winPane].forEach(function (m) {
-      if (m && m.material) m.material.toneMapped = false;
-    });
-  }
-
-  // warm charcoal instead of dead black — reads as a room, not a void
-  wallMat.color.set(0x17131c);
-  scene.background.set(0x120e16);
-  scene.fog.color.set(0x120e16);
-  scene.fog.near = 18; scene.fog.far = 44;
-
-  hemi.color.set(0x3a2f44);
-  hemi.groundColor.set(0x0d0810);
-  hemi.intensity = 0.34;
-  moon.color.set(0x8fa8ff);
-  moon.intensity = 0.28;
-
-  /* --- rug --- */
-  const rug2 = new THREE.Mesh(new THREE.BoxGeometry(9.6, 0.04, 7.4), toonMat(0x3d2438));
-  rug2.position.set(-1.2, 0.02, 1.2); rug2.receiveShadow = true; scene.add(rug2);
-  const rugTrim = new THREE.Mesh(new THREE.BoxGeometry(8.9, 0.05, 6.7), toonMat(0x5c3a54));
-  rugTrim.position.set(-1.2, 0.03, 1.2); scene.add(rugTrim);
-
-  /* --- coffee table + lava lamp + mug --- */
-  place(prop(new THREE.BoxGeometry(2.4, 0.12, 1.1), 0x5c4433, 0.03), -1.5, 0.94, 0.75);
-  [[-1.0, -0.42], [1.0, -0.42], [-1.0, 0.42], [1.0, 0.42]].forEach(function (o) {
-    place(prop(new THREE.BoxGeometry(0.1, 0.88, 0.1), 0x3f2e22, 0.06), -1.5 + o[0], 0.44, 0.75 + o[1]);
+  // control deck + joystick + buttons
+  place(prop(new THREE.BoxGeometry(0.55, 0.12, 1.3), 0x1d2029, 0.04), FX + 0.2, 2.25, CZ);
+  place(prop(new THREE.CylinderGeometry(0.03, 0.03, 0.22, 8), 0xd8dbe0, 0.06), FX + 0.24, 2.4, CZ - 0.35);
+  place(prop(new THREE.SphereGeometry(0.07, 10, 8), 0xff5a7a, 0.06), FX + 0.24, 2.52, CZ - 0.35);
+  [[0x7cffd0, 0.0], [0xffe24e, 0.2], [0x7cb0ff, 0.4]].forEach(function (b) {
+    const btn = place(prop(new THREE.CylinderGeometry(0.05, 0.05, 0.05, 10), b[0], 0.07),
+      FX + 0.24, 2.34, CZ + 0.05 + b[1]);
+    btn.rotation.z = Math.PI / 2;
   });
-  place(prop(new THREE.BoxGeometry(2.1, 0.06, 0.85), 0x4a3628, 0.04), -1.5, 0.36, 0.75);
 
-  place(prop(new THREE.CylinderGeometry(0.16, 0.2, 0.08, 12), 0x2a2d36, 0.06), -2.3, 1.04, 0.75);
-  const lava = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.09, 0.15, 0.55, 14),
-    new THREE.MeshBasicMaterial({ color: 0xff5a7a, transparent: true, opacity: 0.9, toneMapped: false })
-  );
-  lava.position.set(-2.3, 1.36, 0.75); scene.add(lava);
-  const lavaLight = new THREE.PointLight(0xff5a7a, 0.5, 5, 2);
-  lavaLight.position.set(-2.3, 1.4, 0.75); scene.add(lavaLight);
-
-  place(prop(new THREE.CylinderGeometry(0.08, 0.07, 0.14, 10), 0xd8dbe0, 0.06), -0.7, 1.07, 0.75);
-
-  /* --- LED bias strip behind the TV. biggest cozy-per-line in the file. --- */
-  const bias = new THREE.Mesh(
-    new THREE.PlaneGeometry(7.4, 4.5),
-    new THREE.MeshBasicMaterial({ color: 0x5a3fd6, transparent: true, opacity: 0.5, toneMapped: false })
-  );
-  bias.position.set(0, 3.7, -RD / 2 + 0.14); scene.add(bias);
-  const biasLight = new THREE.PointLight(0x7a5aff, 0.9, 12, 2);
-  biasLight.position.set(0, 3.7, -RD / 2 + 0.9); scene.add(biasLight);
-
-  /* --- string lights around the ceiling --- */
-  const bulbs = [];
-  function stringRun(x1, z1, x2, z2, n, sag) {
-    for (let i = 0; i <= n; i++) {
-      const k = i / n;
-      const b = new THREE.Mesh(
-        new THREE.SphereGeometry(0.075, 8, 8),
-        new THREE.MeshBasicMaterial({ color: 0xffcf8a, toneMapped: false })
-      );
-      b.position.set(
-        x1 + (x2 - x1) * k,
-        RH - 0.35 - Math.sin(k * Math.PI) * sag,
-        z1 + (z2 - z1) * k
-      );
-      b.userData.phase = Math.random() * 6.28;
-      scene.add(b); bulbs.push(b);
-    }
-  }
-  stringRun(-RW / 2 + 0.6, -RD / 2 + 0.6,  RW / 2 - 0.6, -RD / 2 + 0.6, 9, 0.5);
-  stringRun(-RW / 2 + 0.6, -RD / 2 + 0.6, -RW / 2 + 0.6,  RD / 2 - 0.6, 8, 0.5);
-  stringRun( RW / 2 - 0.6, -RD / 2 + 0.6,  RW / 2 - 0.6,  RD / 2 - 0.6, 8, 0.5);
-
-  const fairyA = new THREE.PointLight(0xffb870, 0.5, 11, 2);
-  fairyA.position.set(-5.5, RH - 0.9, 0); scene.add(fairyA);
-  const fairyB = new THREE.PointLight(0xffb870, 0.5, 11, 2);
-  fairyB.position.set(5.5, RH - 0.9, 0); scene.add(fairyB);
-
-  /* --- plants --- */
-  function plant(x, z, s) {
-    place(prop(new THREE.CylinderGeometry(0.28, 0.36, 0.55, 10), 0x8a5a3c, 0.05), x, 0.28, z);
-    place(prop(new THREE.CylinderGeometry(0.3, 0.3, 0.06, 10), 0x3a2a1e, 0.05), x, 0.56, z);
-    place(prop(new THREE.CylinderGeometry(0.05, 0.07, 1.5, 6), 0x3f6b3a, 0.05), x, 1.3, z);
-    for (let i = 0; i < 7; i++) {
-      const a = (i / 7) * Math.PI * 2 + Math.random();
-      const leaf = place(prop(new THREE.BoxGeometry(0.62, 0.06, 0.34), 0x4f8a46, 0.06),
-        x + Math.cos(a) * 0.34, 1.2 + Math.random() * 1.0, z + Math.sin(a) * 0.34);
-      leaf.rotation.y = -a;
-      leaf.rotation.z = 0.35 + Math.random() * 0.25;
-      leaf.scale.setScalar(s);
-    }
-  }
-  plant(-6.2, 4.6, 1.0);
-  plant(6.2, 4.6, 0.9);
-
-  /* --- floating shelf, books, a speaker --- */
-  place(prop(new THREE.BoxGeometry(3.0, 0.12, 0.42), 0x5c4433, 0.03), -1.5, 5.9, -RD / 2 + 0.4);
-  const bookCols = [0xff5a7a, 0xffe24e, 0x7cffd0, 0x9b8bff, 0xff8a5a, 0x5a8fd6, 0x6effa0];
-  for (let i = 0; i < 9; i++) {
-    const h = 0.34 + Math.random() * 0.16;
-    const b = place(prop(new THREE.BoxGeometry(0.11, h, 0.3), bookCols[i % bookCols.length], 0.07),
-      -2.6 + i * 0.14, 6.0 + h / 2, -RD / 2 + 0.4);
-    if (i === 7) b.rotation.z = 0.2;
-  }
-  place(prop(new THREE.BoxGeometry(0.5, 0.5, 0.35), 0x1d2028, 0.05), 0.0, 6.2, -RD / 2 + 0.4);
-
-  /* --- blanket over the couch arm --- */
-  const blanket = place(prop(new THREE.BoxGeometry(0.65, 0.9, 1.7), 0xd8a05a, 0.04), -3.35, 1.45, 2.6);
-  blanket.rotation.x = 0.06;
-
-  /* --- warm rim so the couch isn't a silhouette --- */
-  const rim = new THREE.PointLight(0xffb066, 0.42, 10, 2);
-  rim.position.set(-1.5, 4.6, 3.4); scene.add(rim);
-
-  function tick(t) {
-    const b = 0.85 + Math.sin(t * 0.9) * 0.15;
-    lava.scale.set(b, 1 / b, b);
-    lavaLight.intensity = 0.42 + Math.sin(t * 0.9) * 0.12;
-    lava.material.color.setHSL((0.93 + Math.sin(t * 0.15) * 0.06) % 1, 0.8, 0.62);
-
-    bias.material.color.setHSL((t * 0.02) % 1, 0.65, 0.42);
-    biasLight.color.setHSL((t * 0.02) % 1, 0.65, 0.6);
-    biasLight.intensity = power.tv ? 0.9 : 0.25;
-
-    for (const bl of bulbs) {
-      const f = 0.86 + Math.sin(t * 2.2 + bl.userData.phase) * 0.14;
-      bl.material.color.setRGB(f, 0.81 * f, 0.54 * f);
-    }
-  }
-
-  return { tick: tick };
+  arcadeGlow = new THREE.PointLight(0x7cd1ff, 0.6, 9, 2);
+  arcadeGlow.position.set(FX + 0.4, 2.95, CZ); scene.add(arcadeGlow);
 })();
 
-/* ============================================================
-   PART 2 — SEATING FURNITURE
-   ============================================================ */
-(function buildSeating() {
-  const bagA = place(prop(new THREE.SphereGeometry(0.85, 14, 10), 0xb84a55, 0.04), -4.9, 0.48, 2.2);
-  bagA.scale.set(1, 0.6, 1);
-  const bagB = place(prop(new THREE.SphereGeometry(0.85, 14, 10), 0x4a6bb8, 0.04), 1.9, 0.48, 2.4);
-  bagB.scale.set(1, 0.6, 1);
-  const bagC = place(prop(new THREE.SphereGeometry(0.8, 14, 10), 0x5aa87a, 0.04), 3.4, 0.45, 4.2);
-  bagC.scale.set(1, 0.6, 1);
+const arcade = (function () {
+  const W = 400, H = 300;
+  const FIXED = 1 / 60;
 
-  const p1 = place(prop(new THREE.BoxGeometry(1.2, 0.34, 1.2), 0x8a5ab8, 0.05), -3.6, 0.18, -0.9);
-  p1.rotation.y = 0.24;
-  const p2 = place(prop(new THREE.BoxGeometry(1.2, 0.34, 1.2), 0xb8a05a, 0.05), 0.6, 0.18, -1.1);
-  p2.rotation.y = -0.31;
+  /* ---------- input bitmask ---------- */
+  const UP = 1, DOWN = 2, LEFT = 4, RIGHT = 8, FIRE = 16, FLAG = 32, GO = 64;
 
-  place(prop(new THREE.BoxGeometry(1.3, 0.75, 1.3), 0x2f5d57, 0.03), 4.3, 0.72, 1.4);
-  place(prop(new THREE.BoxGeometry(1.3, 1.15, 0.35), 0x356b64, 0.03), 4.3, 1.4, 1.95);
-  [[-0.55, 0.55], [0.55, 0.55], [-0.55, -0.55], [0.55, -0.55]].forEach(function (o) {
-    place(prop(new THREE.BoxGeometry(0.14, 0.35, 0.14), 0x24443f, 0.06), 4.3 + o[0], 0.18, 1.4 + o[1]);
-  });
-
-  const tp1 = place(prop(new THREE.BoxGeometry(0.55, 0.5, 0.2), 0xffb14e, 0.05), -3.05, 1.45, 3.05);
-  tp1.rotation.z = 0.18;
-  const tp2 = place(prop(new THREE.BoxGeometry(0.55, 0.5, 0.2), 0xff5a7a, 0.05), 0.15, 1.45, 3.05);
-  tp2.rotation.z = -0.14;
-})();
-
-/* ============================================================
-   PART 3 — SEAT ANCHORS
-     eye = camera height   av = avatar body y   hy = hitbox y
-     yaw = Math.PI  →  facing the TV
-   ============================================================ */
-const SEATS = [
-  { label: "couch left",    x: -2.65, z:  2.45, yaw: Math.PI,        eye: 1.95, av:  0.50, hy: 1.15, hit: [1.05, 1.5, 1.4] },
-  { label: "couch middle",  x: -1.50, z:  2.45, yaw: Math.PI,        eye: 1.95, av:  0.50, hy: 1.15, hit: [1.05, 1.5, 1.4] },
-  { label: "couch right",   x: -0.35, z:  2.45, yaw: Math.PI,        eye: 1.95, av:  0.50, hy: 1.15, hit: [1.05, 1.5, 1.4] },
-  { label: "red beanbag",   x: -4.90, z:  2.20, yaw: Math.PI - 0.40, eye: 1.70, av:  0.28, hy: 0.70, hit: [1.7, 1.5, 1.7] },
-  { label: "blue beanbag",  x:  1.90, z:  2.40, yaw: Math.PI + 0.28, eye: 1.70, av:  0.28, hy: 0.70, hit: [1.7, 1.5, 1.7] },
-  { label: "green beanbag", x:  3.40, z:  4.20, yaw: Math.PI + 0.50, eye: 1.68, av:  0.26, hy: 0.68, hit: [1.6, 1.5, 1.6] },
-  { label: "floor pillow",  x: -3.60, z: -0.90, yaw: Math.PI,        eye: 1.30, av: -0.28, hy: 0.42, hit: [1.3, 1.0, 1.3] },
-  { label: "floor pillow",  x:  0.60, z: -1.10, yaw: Math.PI,        eye: 1.30, av: -0.28, hy: 0.42, hit: [1.3, 1.0, 1.3] },
-  { label: "lounge chair",  x:  4.30, z:  1.40, yaw: Math.PI - 0.32, eye: 1.92, av:  0.45, hy: 1.10, hit: [1.45, 1.5, 1.45] }
-];
-
-const SEAT_HITS = SEATS.map(function (s, i) {
-  const m = new THREE.Mesh(
-    new THREE.BoxGeometry(s.hit[0], s.hit[1], s.hit[2]),
-    new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false })
-  );
-  m.position.set(s.x, s.hy, s.z);
-  m.userData.act = "seat";
-  m.userData.seat = i;
-  scene.add(m);
-  return m;
-});
-
-const seatRing = new THREE.Mesh(
-  new THREE.RingGeometry(0.5, 0.64, 26),
-  new THREE.MeshBasicMaterial({
-    color: 0x7cd1ff, transparent: true, opacity: 0,
-    side: THREE.DoubleSide, depthWrite: false, toneMapped: false
-  })
-);
-seatRing.rotation.x = -Math.PI / 2;
-seatRing.position.y = 0.07;
-scene.add(seatRing);
-
-/* ============================================================
-   PART 4 — AVATARS
-   ============================================================ */
-function nameTag(name, colorHex) {
-  const c = document.createElement("canvas"); c.width = 256; c.height = 64;
-  const g = c.getContext("2d");
-  g.fillStyle = "rgba(10,12,20,0.8)"; g.fillRect(0, 14, 256, 36);
-  g.fillStyle = "#" + colorHex.toString(16).padStart(6, "0"); g.fillRect(0, 14, 5, 36);
-  g.fillStyle = "#eaf0ff"; g.font = "600 22px ui-monospace, monospace";
-  g.textAlign = "center"; g.textBaseline = "middle";
-  g.fillText(name, 130, 33);
-  const t = new THREE.CanvasTexture(c); t.encoding = THREE.sRGBEncoding;
-  const s = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: t, transparent: true, depthTest: false, toneMapped: false
-  }));
-  s.scale.set(1.15, 0.29, 1); s.position.y = 2.25; s.renderOrder = 999;
-  return s;
-}
-
-function chatBubble(msg) {
-  const c = document.createElement("canvas"); c.width = 384; c.height = 96;
-  const g = c.getContext("2d");
-  g.fillStyle = "rgba(16,20,32,0.92)"; g.fillRect(0, 0, 384, 76);
-  g.strokeStyle = "rgba(255,180,120,0.6)"; g.lineWidth = 2; g.strokeRect(1, 1, 382, 74);
-  g.beginPath(); g.moveTo(178, 75); g.lineTo(192, 94); g.lineTo(206, 75);
-  g.fillStyle = "rgba(16,20,32,0.92)"; g.fill();
-  g.fillStyle = "#dfe6f2"; g.font = "18px ui-monospace, monospace"; g.textAlign = "center";
-  const words = msg.split(" ");
-  let line = "", y = 30;
-  for (const w of words) {
-    const t = line + w + " ";
-    if (g.measureText(t).width > 350) { g.fillText(line, 192, y); line = w + " "; y += 24; if (y > 66) break; }
-    else line = t;
-  }
-  g.fillText(line, 192, y);
-  const tex = new THREE.CanvasTexture(c); tex.encoding = THREE.sRGBEncoding;
-  const s = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: tex, transparent: true, depthTest: false, toneMapped: false
-  }));
-  s.scale.set(1.9, 0.48, 1); s.position.y = 2.9; s.renderOrder = 1000;
-  s.userData.life = 6;
-  return s;
-}
-
-function buildAvatar(name, colorHex) {
-  const g = new THREE.Group();
-
-  // hips: everything above the legs hangs off this, so we can bob/lean as one piece
-  const hips = new THREE.Group();
-  hips.position.y = 0;
-  g.add(hips);
-
-  const torso = prop(new THREE.BoxGeometry(0.5, 0.75, 0.32), colorHex, 0.05);
-  torso.position.y = 1.05; hips.add(torso);
-
-  const head = prop(new THREE.BoxGeometry(0.38, 0.38, 0.36), 0xd9a877, 0.06);
-  head.position.y = 1.66; hips.add(head);
-
-  const brim = prop(new THREE.BoxGeometry(0.4, 0.06, 0.16), colorHex, 0.07);
-  brim.position.set(0, 0.1, 0.24); head.add(brim);   // parented to head so it turns with it
-
-  const armL = prop(new THREE.BoxGeometry(0.14, 0.6, 0.16), colorHex, 0.06);
-  const armR = prop(new THREE.BoxGeometry(0.14, 0.6, 0.16), colorHex, 0.06);
-  armL.position.set(-0.33, 1.08, 0); armR.position.set(0.33, 1.08, 0);
-  hips.add(armL); hips.add(armR);
-
-  const legL = prop(new THREE.BoxGeometry(0.18, 0.7, 0.2), 0x1d2130, 0.06);
-  const legR = prop(new THREE.BoxGeometry(0.18, 0.7, 0.2), 0x1d2130, 0.06);
-  legL.position.set(-0.13, 0.35, 0); legR.position.set(0.13, 0.35, 0);
-  g.add(legL); g.add(legR);
-
-  g.add(nameTag(name, colorHex));
-
-  g.userData.parts  = { hips, torso, head, legL, legR, armL, armR };
-  g.userData.bubble = null;
-  g.userData.walk   = 0;
-  g.userData.phase  = Math.random() * 6.28;
-  scene.add(g);
-  return g;
-}
-
-/* speed is in world-units/sec. lookYaw is where their camera is pointed. */
-function poseAvatar(av, seated, dt, speed, bodyYaw, lookYaw, t) {
-  const p  = av.userData.parts;
-  const ph = av.userData.phase;
-
-  // always breathing, even standing still — nothing in the room should be a statue
-  const breath = Math.sin(t * 1.5 + ph) * 0.012;
-
-  // head turns toward where they're actually looking, up to ~40 degrees
-  const headTurn = THREE.MathUtils.clamp(shortAngle(bodyYaw, lookYaw + Math.PI), -0.7, 0.7);
-  p.head.rotation.y += (headTurn - p.head.rotation.y) * K(0.2, dt);
-
-  if (seated) {
-    p.legL.rotation.x = Math.PI / 2; p.legR.rotation.x = Math.PI / 2;
-    p.legL.position.set(-0.13, 0.62, 0.28);
-    p.legR.position.set( 0.13, 0.62, 0.28);
-    p.armL.rotation.x = 0.4;  p.armR.rotation.x = 0.4;
-    p.armL.rotation.z = 0.12; p.armR.rotation.z = -0.12;
-    p.hips.rotation.x = 0;
-    p.hips.position.y = breath * 0.6;
-    p.torso.position.y = 1.05;
-    av.userData.walk = 0;
-    return;
+  function readLocalBits() {
+    let b = 0;
+    if (keys["arrowup"]    || keys["w"]) b |= UP;
+    if (keys["arrowdown"]  || keys["s"]) b |= DOWN;
+    if (keys["arrowleft"]  || keys["a"]) b |= LEFT;
+    if (keys["arrowright"] || keys["d"]) b |= RIGHT;
+    if (keys[" "] || keys["spacebar"])   b |= FIRE;
+    if (keys["f"])                       b |= FLAG;
+    if (keys["enter"])                   b |= GO;
+    return b;
   }
 
-  const walking = speed > 0.25;
-  av.userData.walk += (walking ? speed : 0) * dt * 4.2;
-
-  const sw = walking ? Math.sin(av.userData.walk) * Math.min(0.62, 0.28 + speed * 0.09) : 0;
-  const bob = walking ? Math.abs(Math.sin(av.userData.walk)) * 0.045 : 0;
-
-  // legs + counter-swinging arms
-  p.legL.rotation.x = sw;  p.legR.rotation.x = -sw;
-  p.legL.position.set(-0.13, 0.35, 0);
-  p.legR.position.set( 0.13, 0.35, 0);
-  p.armL.rotation.x = -sw * 0.85; p.armR.rotation.x = sw * 0.85;
-  p.armL.rotation.z = 0.06; p.armR.rotation.z = -0.06;
-
-  // lean into the walk + bob on each footfall
-  const lean = THREE.MathUtils.clamp(speed * 0.035, 0, 0.16);
-  p.hips.rotation.x += (lean - p.hips.rotation.x) * K(0.15, dt);
-  p.hips.position.y  = bob + breath;
-  p.torso.position.y = 1.05;
-}
-
-function sayOver(av, msg) {
-  if (av.userData.bubble) av.remove(av.userData.bubble);
-  const b = chatBubble(msg);
-  av.add(b);
-  av.userData.bubble = b;
-}
-
-/* ============================================================
-   PART 5 — HUD
-   ============================================================ */
-const hud = document.createElement("div");
-hud.innerHTML =
-'<style>' +
-'#net{position:fixed;right:14px;top:14px;z-index:12;width:216px;font-family:ui-monospace,monospace;font-size:11px;color:#eae6f0}' +
-'#net .panel{background:rgba(18,15,24,.78);border:1px solid rgba(255,180,120,.22);border-radius:10px;padding:9px 11px;backdrop-filter:blur(8px);margin-bottom:8px}' +
-'#net .hdr{font-size:10px;letter-spacing:.18em;text-transform:uppercase;opacity:.5;margin-bottom:6px}' +
-'#net .row{display:flex;align-items:center;gap:7px;padding:2px 0}' +
-'#net .dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}' +
-'#net .who{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
-'#net .badge{font-size:9px;opacity:.55}' +
-'#chatpanel{cursor:pointer}#chatpanel:hover{border-color:rgba(255,180,120,.6)}' +
-'#chatlog{min-height:20px;max-height:150px;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end}' +
-'#chatlog div{padding:1px 0;line-height:1.35;opacity:.9}' +
-'#namein{width:100%;background:rgba(28,22,34,.85);border:1px solid rgba(255,180,120,.32);color:#eae6f0;border-radius:7px;padding:5px 7px;font:11px ui-monospace,monospace;outline:none}' +
-'#chatin{position:fixed;left:50%;bottom:100px;transform:translateX(-50%);z-index:14;width:420px;max-width:88vw;display:none;background:rgba(18,15,24,.95);border:1px solid rgba(255,180,120,.65);color:#eae6f0;border-radius:9px;padding:10px 12px;font:12px ui-monospace,monospace;outline:none;backdrop-filter:blur(8px)}' +
-'#netstate{position:fixed;right:14px;bottom:14px;z-index:12;font:10px ui-monospace,monospace;letter-spacing:.1em;text-transform:uppercase;opacity:.55;color:#ffb870}' +
-'#loopwarn{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:99;display:none;max-width:560px;background:#2a0f14;border:2px solid #ff5a7a;color:#ffd9e0;border-radius:12px;padding:20px 24px;font:13px/1.6 ui-monospace,monospace}' +
-'#loopwarn code{background:#12060a;padding:2px 6px;border-radius:4px;color:#ffe24e;display:inline-block;margin:3px 0}' +
-'</style>' +
-'<div id="net">' +
-  '<div class="panel"><div class="hdr">In the cave</div><div id="roster"></div></div>' +
-  '<div class="panel" id="chatpanel"><div class="hdr">Chat &middot; press T</div><div id="chatlog"></div></div>' +
-  '<div class="panel"><input id="namein" maxlength="16" placeholder="your name" /></div>' +
-'</div>' +
-'<input id="chatin" maxlength="160" placeholder="say something — enter to send, esc to cancel" />' +
-'<div id="netstate">connecting…</div>' +
-'<div id="loopwarn"><b>The frame-loop edit is missing.</b><br><br>' +
-  'Nothing will move until you fix this. Find <code>function frame()</code> near the bottom of chillroom.html and change:<br><br>' +
-  '<code>drawScreen(t); drawWindow(dt); arcade.tick(dt);</code><br>to<br>' +
-  '<code>drawScreen(t); drawWindow(dt); arcade.tick(dt); NET.update(dt);</code><br><br>' +
-  'And a few lines above that:<br><br>' +
-  '<code>const lock=arcade.active;</code><br>to<br>' +
-  '<code>const lock=arcade.active || NET.seated || NET.chatting;</code></div>';
-document.body.appendChild(hud);
-
-const rosterEl  = document.getElementById("roster");
-const chatlogEl = document.getElementById("chatlog");
-const nameEl    = document.getElementById("namein");
-const chatEl    = document.getElementById("chatin");
-const stateEl   = document.getElementById("netstate");
-const chatPanel = document.getElementById("chatpanel");
-const loopWarn  = document.getElementById("loopwarn");
-
-function logChat(name, colorHex, msg) {
-  const d = document.createElement("div");
-  const hex = "#" + (((colorHex | 0) || 0x7cd1ff)).toString(16).padStart(6, "0");
-  d.innerHTML = '<span style="color:' + hex + '">' + name + '</span> ' +
-                '<span style="opacity:.85">' + msg.replace(/[<>&]/g, "") + '</span>';
-  chatlogEl.appendChild(d);
-  while (chatlogEl.children.length > 9) chatlogEl.removeChild(chatlogEl.firstChild);
-}
-
-/* ============================================================
-   PART 6 — NETWORK
-   ============================================================ */
-const NET = (function () {
-  let ws = null, myId = null, driver = null, skew = 0;
-  let connected = false, retry = 800;
-  const peers = new Map();
-
-  let mySeat = null;
-  let myName = "", myColor = AV_COLORS[(Math.random() * AV_COLORS.length) | 0];
-  const STAND_EYE = 2.3;
-  const seatCam = new THREE.Vector3();
-  const seatTarget = new THREE.Vector3();
-
-  let poseAcc = 0, tickAcc = 0, beatAcc = 0;
-  let lastSent = { x: 1e9, z: 1e9, yaw: 1e9 };
-  let applying = false;
-  let chatOpen = false;
-  let updateCalls = 0;               // <-- the guard
-
-  try {
-    myName = localStorage.getItem("cr_name") || ("guest" + ((Math.random() * 90 + 10) | 0));
-    const c = +localStorage.getItem("cr_color");
-    if (c) myColor = c;
-  } catch (e) { myName = "guest" + ((Math.random() * 90 + 10) | 0); }
-
-  nameEl.value = myName;
-  nameEl.addEventListener("change", function () {
-    myName = (nameEl.value || "guest").slice(0, 16);
-    try {
-      localStorage.setItem("cr_name", myName);
-      localStorage.setItem("cr_color", String(myColor));
-    } catch (e) {}
-    send({ t: "join", name: myName, color: myColor });
-    drawRoster();
-  });
-
-  function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
-
-  function drawRoster() {
-    const rows = [[myId || "me", myName, myColor, mySeat, true]];
-    for (const kv of peers) rows.push([kv[0], kv[1].name, kv[1].color, kv[1].seat, false]);
-    rosterEl.innerHTML = rows.map(function (r) {
-      const id = r[0], n = r[1], c = r[2], seat = r[3], isMe = r[4];
-      const hex = "#" + (((c | 0) || 0x7cd1ff)).toString(16).padStart(6, "0");
-      const where = (seat !== null && seat !== undefined) ? SEATS[seat].label : "standing";
-      const drv = (driver && driver === id) ? ' <span class="badge">&#9654;</span>' : "";
-      return '<div class="row"><div class="dot" style="background:' + hex + '"></div>' +
-             '<div class="who">' + n + (isMe ? " (you)" : "") + '</div>' +
-             '<div class="badge">' + where + '</div>' + drv + '</div>';
-    }).join("");
+  /* ---------- seeded PRNG (mulberry32) — the whole reason this syncs ---------- */
+  let _s = 1;
+  function srand(s) { _s = (s >>> 0) || 1; }
+  function rnd() {
+    _s = (_s + 0x6D2B79F5) | 0;
+    let t = Math.imul(_s ^ (_s >>> 15), 1 | _s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   }
 
-  /* ---- media ---- */
-  const _playVideo = playVideo, _playAudio = playAudio, _showEmbed = showEmbed;
+  let active = false, view = "menu", sel = 0, attractT = 0, blink = 0;
+  let game = null;
 
-  function share(action, url) {
-    if (applying) return;
-    if (typeof url === "string" && url.indexOf("blob:") === 0) {
-      status("local file — only you can see that. paste a link to share it with the room");
-      return;
-    }
-    send({ t: "media", action: action, url: url });
+  const SEAT = {
+    pos:  new THREE.Vector3(-4.75, 2.90, -0.40),
+    look: new THREE.Vector3(-5.73, 2.95, -0.40),
+    ease: 0.12
+  };
+  const seatProg = new THREE.Vector3();
+  function seatCamera() { seatProg.lerp(SEAT.pos, SEAT.ease); camera.position.copy(seatProg); camera.lookAt(SEAT.look); }
+
+  function clear(c) { axx.fillStyle = c || "#070912"; axx.fillRect(0, 0, W, H); }
+  function text(s, x, y, size, col, align) {
+    axx.fillStyle = col || "#7cffd0";
+    axx.font = "700 " + (size || 16) + "px ui-monospace, monospace";
+    axx.textAlign = align || "left"; axx.fillText(s, x, y); axx.textAlign = "left";
   }
+  function center(s, y, size, col) { text(s, W / 2, y, size, col, "center"); }
 
-  playVideo = function (u) { _playVideo(u); share("video", u); };
-  playAudio = function (u) { _playAudio(u); share("audio", u); };
-  showEmbed = function (u) { _showEmbed(u); share("embed", u); };
-
-  function localStop() {
-    if (activeEl) { activeEl.pause(); try { activeEl.currentTime = 0; } catch (e) {} }
-    clearEmbed();
-    TV.material.map = screenTex; TV.material.needsUpdate = true;
-    videoTex = null; mode = "idle"; activeEl = null;
-  }
-
-  function applyMedia(m) {
-    applying = true;
-    try {
-      if (m.action === "video") playVideo(m.url);
-      else if (m.action === "audio") playAudio(m.url);
-      else if (m.action === "embed") showEmbed(m.url);
-      else if (m.action === "stop") localStop();
-    } catch (e) { console.error("[chillroom] media", e); }
-    applying = false;
-    if (m.by && m.driver !== myId) status(m.by + " put something on");
-  }
-
-  function applyTick(tk) {
-    if (!activeEl) return;
-    const now = Date.now() + skew;
-    const expect = tk.state === "play" ? tk.time + (now - tk.sv) / 1000 : tk.time;
-    if (Math.abs(activeEl.currentTime - expect) > 0.6) {
-      try { activeEl.currentTime = expect; } catch (e) {}
-    }
-    if (tk.state === "play" && activeEl.paused) activeEl.play().catch(function () {});
-    if (tk.state === "pause" && !activeEl.paused) activeEl.pause();
-  }
-
-  function pushTick(playing) {
-    if (!activeEl || driver !== myId) return;
-    send({ t: "tick", state: playing ? "play" : "pause", time: activeEl.currentTime });
-  }
-
-  document.getElementById("bplay").addEventListener("click",  function () { pushTick(true); });
-  document.getElementById("bpause").addEventListener("click", function () { pushTick(false); });
-  document.getElementById("bstop").addEventListener("click",  function () {
-    if (!applying) send({ t: "media", action: "stop" });
-  });
-
-  /* ---- seats ---- */
-  function seatTaken(i) {
-    for (const p of peers.values()) if (p.seat === i) return true;
-    return false;
-  }
-
-  function toggleSeat(i) {
-    if (mySeat === i) {
-      send({ t: "seat", seat: null });
-      const s = SEATS[i];
-      mySeat = null;
-      // step out in front of the seat, back at standing height
-      player.set(
-        THREE.MathUtils.clamp(s.x - Math.sin(s.yaw) * 1.5, -RW / 2 + 1, RW / 2 - 1),
-        STAND_EYE,
-        THREE.MathUtils.clamp(s.z - Math.cos(s.yaw) * 1.5, -RD / 2 + 1, RD / 2 - 1)
-      );
-      status("standing");
-    } else {
-      if (seatTaken(i)) { status(SEATS[i].label + " is taken"); return; }
-      send({ t: "seat", seat: i });
-      mySeat = i;
-      seatCam.copy(camera.position);
-      cam.yaw = SEATS[i].yaw;
-      cam.pitch = 0;
-      status("sat down · " + SEATS[i].label + " — E or click to get up");
-    }
-    drawRoster();
-  }
-
-  function nearestSeat() {
-    let best = -1, bd = 1.9;
-    for (let i = 0; i < SEATS.length; i++) {
-      if (seatTaken(i)) continue;
-      const d = Math.hypot(player.x - SEATS[i].x, player.z - SEATS[i].z);
-      if (d < bd) { bd = d; best = i; }
-    }
-    return best;
-  }
-
-  /* ---- chat ---- */
-  function openChat()  { chatOpen = true;  chatEl.style.display = "block"; chatEl.value = ""; chatEl.focus(); }
-  function closeChat() { chatOpen = false; chatEl.style.display = "none";  chatEl.blur(); }
-  chatPanel.addEventListener("click", openChat);
-
-  window.addEventListener("keydown", function (e) {
-    if (chatOpen) {
-      e.stopImmediatePropagation();
-      if (e.key === "Enter") {
-        const m = chatEl.value.trim();
-        if (m) { send({ t: "chat", msg: m }); logChat(myName, myColor, m); }
-        closeChat();
-      } else if (e.key === "Escape") closeChat();
-      return;
-    }
-    if (document.activeElement === nameEl) { e.stopImmediatePropagation(); return; }
-    if (arcade.active) return;
-
-    const k = e.key.toLowerCase();
-    if (k === "t") {
-      e.preventDefault(); e.stopImmediatePropagation();
-      openChat();
-    } else if (k === "e") {
-      e.preventDefault(); e.stopImmediatePropagation();
-      if (mySeat !== null) toggleSeat(mySeat);
-      else {
-        const s = nearestSeat();
-        if (s >= 0) toggleSeat(s);
-        else status("walk up to a seat first");
+  /* ===== SNAKE ===== */
+  const Snake = (function () {
+    const cell = 15, cols = 24, rows = 16, ox = 20, oy = 36;
+    let snake, dir, ndir, food, acc, step, score;
+    function placeFood() {
+      while (true) {
+        const f = { x: (rnd() * cols) | 0, y: (rnd() * rows) | 0 };
+        if (!snake.some(function (s) { return s.x === f.x && s.y === f.y; })) { food = f; return; }
       }
     }
-  }, true);
+    return {
+      name: "SNAKE", over: false, twoPlayer: false,
+      score() { return score; },
+      reset() {
+        snake = [{ x: 8, y: 8 }, { x: 7, y: 8 }, { x: 6, y: 8 }];
+        dir = { x: 1, y: 0 }; ndir = { x: 1, y: 0 };
+        acc = 0; step = 0.11; score = 0; this.over = false; placeFood();
+      },
+      step(dt, i0) {
+        if ((i0 & UP)    && dir.y === 0) ndir = { x: 0, y: -1 };
+        if ((i0 & DOWN)  && dir.y === 0) ndir = { x: 0, y: 1 };
+        if ((i0 & LEFT)  && dir.x === 0) ndir = { x: -1, y: 0 };
+        if ((i0 & RIGHT) && dir.x === 0) ndir = { x: 1, y: 0 };
 
-  /* ---- clicks: seats first, then everything you already had ---- */
-  const _hitList  = hitList;
-  const _tryClick = tryClick;
+        acc += dt; if (acc < step) return; acc = 0; dir = ndir;
+        const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+        if (head.x < 0 || head.y < 0 || head.x >= cols || head.y >= rows ||
+            snake.some(function (s) { return s.x === head.x && s.y === head.y; })) { this.over = true; return; }
+        snake.unshift(head);
+        if (head.x === food.x && head.y === food.y) { score += 10; if (step > 0.05) step -= 0.004; placeFood(); }
+        else snake.pop();
+      },
+      draw() {
+        clear();
+        axx.strokeStyle = "#1d2a44"; axx.lineWidth = 2; axx.strokeRect(ox - 2, oy - 2, cols * cell + 4, rows * cell + 4);
+        axx.fillStyle = "#ff5a7a"; axx.fillRect(ox + food.x * cell + 2, oy + food.y * cell + 2, cell - 4, cell - 4);
+        for (let i = 0; i < snake.length; i++) {
+          axx.fillStyle = i === 0 ? "#9bffd0" : "#39c98f";
+          axx.fillRect(ox + snake[i].x * cell + 1, oy + snake[i].y * cell + 1, cell - 2, cell - 2);
+        }
+        text("SNAKE", 12, 24, 16, "#7cffd0"); text("SCORE " + score, W - 12, 24, 16, "#cfe6ff", "right");
+      }
+    };
+  })();
 
-  hitList = function () { return _hitList().concat(SEAT_HITS); };
+  /* ===== BREAKOUT ===== */
+  const Breakout = (function () {
+    const PW = 64, PH = 10, BR = 5;
+    let px, ball, bricks, score, lives, won;
+    function build() {
+      bricks = []; const cols = 10, rows = 5, bw = 36, bh = 14, gx = 8, gy = 42, gap = 2;
+      const colrs = ["#ff5a7a", "#ffb14e", "#ffe24e", "#7cffd0", "#7cb0ff"];
+      for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++)
+        bricks.push({ x: gx + c * (bw + gap), y: gy + r * (bh + gap), w: bw, h: bh, c: colrs[r], alive: true });
+    }
+    function launch() { ball = { x: 200, y: 240, vx: (rnd() < 0.5 ? -1 : 1) * 150, vy: -180, r: BR }; }
+    return {
+      name: "BREAKOUT", over: false, twoPlayer: false,
+      score() { return score; },
+      reset() { px = 168; score = 0; lives = 3; won = false; this.over = false; build(); launch(); },
+      step(dt, i0) {
+        const sp = 280;
+        if (i0 & LEFT)  px -= sp * dt;
+        if (i0 & RIGHT) px += sp * dt;
+        px = Math.max(8, Math.min(W - 8 - PW, px));
+        ball.x += ball.vx * dt; ball.y += ball.vy * dt;
+        if (ball.x < 8 + ball.r) { ball.x = 8 + ball.r; ball.vx *= -1; }
+        if (ball.x > W - 8 - ball.r) { ball.x = W - 8 - ball.r; ball.vx *= -1; }
+        if (ball.y < 30 + ball.r) { ball.y = 30 + ball.r; ball.vy *= -1; }
+        const py = H - 24;
+        if (ball.vy > 0 && ball.y + ball.r >= py && ball.y + ball.r <= py + PH + 6 && ball.x >= px && ball.x <= px + PW) {
+          ball.vy = -Math.abs(ball.vy); ball.vx = ((ball.x - (px + PW / 2)) / (PW / 2)) * 220;
+        }
+        for (const b of bricks) {
+          if (!b.alive) continue;
+          if (ball.x > b.x && ball.x < b.x + b.w && ball.y - ball.r < b.y + b.h && ball.y + ball.r > b.y) {
+            b.alive = false; score += 10; ball.vy *= -1;
+            if (!bricks.some(function (q) { return q.alive; })) { won = true; this.over = true; }
+            break;
+          }
+        }
+        if (ball.y > H) { lives--; if (lives <= 0) this.over = true; else launch(); }
+      },
+      draw() {
+        clear();
+        for (const b of bricks) if (b.alive) { axx.fillStyle = b.c; axx.fillRect(b.x, b.y, b.w, b.h); }
+        axx.fillStyle = "#9bffd0"; axx.fillRect(px, H - 24, PW, PH);
+        axx.fillStyle = "#fff"; axx.beginPath(); axx.arc(ball.x, ball.y, ball.r, 0, 7); axx.fill();
+        text("BREAKOUT", 12, 24, 15, "#7cffd0");
+        text("SCORE " + score, W / 2, 24, 15, "#cfe6ff", "center");
+        text("\u2665 " + Math.max(0, lives), W - 12, 24, 15, "#ff8aa0", "right");
+        if (this.over) center(won ? "CLEARED!" : "GAME OVER", H / 2, 22, won ? "#ffe24e" : "#ff5a7a");
+      }
+    };
+  })();
 
-  tryClick = function (cx, cy) {
-    ndc.x = (cx / window.innerWidth) * 2 - 1;
-    ndc.y = -(cy / window.innerHeight) * 2 + 1;
-    ray.setFromCamera(ndc, camera);
-    const hit = ray.intersectObjects(SEAT_HITS, false)[0];
-    if (hit) { toggleSeat(hit.object.userData.seat); return; }
-    _tryClick(cx, cy);
+  /* ===== PONG — CPU, or a real second player ===== */
+  const Pong = (function () {
+    const PW = 8, PH = 46;
+    let l, r, ball, sl, sr;
+    function serve(d) { ball = { x: 200, y: 150, vx: d * 175, vy: (rnd() * 120 - 60), r: 5 }; }
+    return {
+      name: "PONG", over: false, twoPlayer: true,
+      score() { return sl; },
+      reset() { l = 127; r = 127; sl = 0; sr = 0; this.over = false; serve(rnd() < 0.5 ? -1 : 1); },
+      step(dt, i0, i1, e0, e1, versus) {
+        const sp = 250;
+        if (i0 & UP)   l -= sp * dt;
+        if (i0 & DOWN) l += sp * dt;
+        l = Math.max(30, Math.min(H - PH, l));
+
+        if (versus) {
+          if (i1 & UP)   r -= sp * dt;
+          if (i1 & DOWN) r += sp * dt;
+        } else {
+          const target = ball.y - PH / 2, aisp = 175;
+          if (r + 3 < target) r += aisp * dt; else if (r - 3 > target) r -= aisp * dt;
+        }
+        r = Math.max(30, Math.min(H - PH, r));
+
+        ball.x += ball.vx * dt; ball.y += ball.vy * dt;
+        if (ball.y < 30 + ball.r) { ball.y = 30 + ball.r; ball.vy *= -1; }
+        if (ball.y > H - ball.r) { ball.y = H - ball.r; ball.vy *= -1; }
+        if (ball.vx < 0 && ball.x - ball.r < 18 + PW && ball.x > 18 && ball.y > l && ball.y < l + PH) {
+          ball.x = 18 + PW + ball.r; ball.vx = Math.abs(ball.vx) * 1.05; ball.vy += ((ball.y - (l + PH / 2)) / (PH / 2)) * 120;
+        }
+        if (ball.vx > 0 && ball.x + ball.r > W - 18 - PW && ball.x < W - 18 && ball.y > r && ball.y < r + PH) {
+          ball.x = W - 18 - PW - ball.r; ball.vx = -Math.abs(ball.vx) * 1.05; ball.vy += ((ball.y - (r + PH / 2)) / (PH / 2)) * 120;
+        }
+        if (ball.x < 0) { sr++; if (sr >= 7) this.over = true; else serve(1); }
+        if (ball.x > W) { sl++; if (sl >= 7) this.over = true; else serve(-1); }
+      },
+      draw(versus, n0, n1) {
+        clear();
+        axx.strokeStyle = "#1d2a44"; axx.setLineDash([6, 8]); axx.beginPath();
+        axx.moveTo(W / 2, 30); axx.lineTo(W / 2, H); axx.stroke(); axx.setLineDash([]);
+        const leftName  = versus ? (n0 || "P1").slice(0, 7).toUpperCase() : "YOU";
+        const rightName = versus ? (n1 || "P2").slice(0, 7).toUpperCase() : "CPU";
+        text(leftName + " " + sl, 70, 22, 16, "#7cffd0", "center");
+        text(rightName + " " + sr, W - 70, 22, 16, "#ff8aa0", "center");
+        axx.fillStyle = "#9bffd0"; axx.fillRect(18, l, PW, PH);
+        axx.fillStyle = "#ff8aa0"; axx.fillRect(W - 18 - PW, r, PW, PH);
+        axx.fillStyle = "#fff"; axx.beginPath(); axx.arc(ball.x, ball.y, ball.r, 0, 7); axx.fill();
+        if (this.over) center(sl > sr ? leftName + " WINS!" : rightName + " WINS", H / 2 - 10, 22, sl > sr ? "#ffe24e" : "#ff8aa0");
+      }
+    };
+  })();
+
+  /* ===== 2048 ===== */
+  const G2048 = (function () {
+    const N = 4, ox = 80, oy = 48, cs = 54, gap = 5;
+    let grid, score, won;
+    function emptyCells() { const e = []; for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) if (!grid[y][x]) e.push([x, y]); return e; }
+    function spawn() { const e = emptyCells(); if (!e.length) return; const p = e[(rnd() * e.length) | 0]; grid[p[1]][p[0]] = rnd() < 0.9 ? 2 : 4; }
+    function slide(row) {
+      let a = row.filter(function (v) { return v; }); let g = 0;
+      for (let i = 0; i < a.length - 1; i++) { if (a[i] === a[i + 1]) { a[i] *= 2; g += a[i]; if (a[i] === 2048) won = true; a.splice(i + 1, 1); } }
+      while (a.length < N) a.push(0);
+      return { row: a, g: g };
+    }
+    function moveLeft() { let moved = false; for (let y = 0; y < N; y++) { const o = slide(grid[y]); score += o.g; if (o.row.join() !== grid[y].join()) moved = true; grid[y] = o.row; } return moved; }
+    function rotate() { const n = []; for (let x = 0; x < N; x++) { n.push([]); for (let y = N - 1; y >= 0; y--) n[x].push(grid[y][x]); } grid = n; }
+    function move(dir) { for (let i = 0; i < dir; i++) rotate(); const moved = moveLeft(); for (let i = 0; i < (4 - dir) % 4; i++) rotate(); return moved; }
+    function anyMoves() {
+      if (emptyCells().length) return true;
+      for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) { const v = grid[y][x]; if ((x < N - 1 && grid[y][x + 1] === v) || (y < N - 1 && grid[y + 1][x] === v)) return true; }
+      return false;
+    }
+    const COL = { 2: "#2b3a55", 4: "#33507a", 8: "#3f6fb0", 16: "#5a8fd6", 32: "#7cb0ff", 64: "#7cffd0", 128: "#ffe24e", 256: "#ffb14e", 512: "#ff8a5a", 1024: "#ff5a7a", 2048: "#ff3df0" };
+    return {
+      name: "2048", over: false, twoPlayer: false,
+      score() { return score; },
+      reset() {
+        grid = []; for (let y = 0; y < N; y++) { grid.push([]); for (let x = 0; x < N; x++) grid[y].push(0); }
+        score = 0; won = false; this.over = false; spawn(); spawn();
+      },
+      // discrete: acts on the EDGE (newly pressed), not held
+      step(dt, i0, i1, e0) {
+        let dir = -1;
+        if (e0 & LEFT)  dir = 0;
+        else if (e0 & UP)    dir = 3;
+        else if (e0 & RIGHT) dir = 2;
+        else if (e0 & DOWN)  dir = 1;
+        if (dir < 0) return;
+        if (move(dir)) spawn();
+        if (!anyMoves()) this.over = true;
+      },
+      draw() {
+        clear("#0a0d16");
+        text("2048", 12, 30, 18, "#7cffd0"); text("SCORE " + score, W - 12, 30, 15, "#cfe6ff", "right");
+        for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+          const v = grid[y][x], cx = ox + x * (cs + gap), cy = oy + y * (cs + gap);
+          axx.fillStyle = v ? (COL[v] || "#ff3df0") : "#141a28";
+          axx.fillRect(cx, cy, cs, cs);
+          if (v) {
+            axx.fillStyle = v > 4 ? "#0a0d16" : "#dfe6f2";
+            axx.font = "700 " + (v > 512 ? 18 : v > 64 ? 21 : 24) + "px ui-monospace, monospace";
+            axx.textAlign = "center"; axx.textBaseline = "middle";
+            axx.fillText(String(v), cx + cs / 2, cy + cs / 2);
+            axx.textAlign = "left"; axx.textBaseline = "alphabetic";
+          }
+        }
+        if (won) center("2048!", H - 10, 14, "#ffe24e");
+        if (this.over) center("NO MOVES LEFT", H / 2, 22, "#ff5a7a");
+      }
+    };
+  })();
+
+  /* ===== ASTEROIDS ===== */
+  const Asteroids = (function () {
+    let ship, bullets, rocks, score, lives, cool, inv;
+    function newRock(x, y, size) {
+      const a = rnd() * 7, sp = 30 + rnd() * 40 + (3 - size) * 15;
+      return { x: x, y: y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, size: size, r: size * 9, seed: rnd() * 6 };
+    }
+    function spawnWave(n) {
+      rocks = [];
+      for (let i = 0; i < n; i++) {
+        let x, y;
+        do { x = rnd() * W; y = rnd() * H; } while (Math.hypot(x - ship.x, y - ship.y) < 80);
+        rocks.push(newRock(x, y, 3));
+      }
+    }
+    function wrap(o) { if (o.x < 0) o.x += W; if (o.x > W) o.x -= W; if (o.y < 0) o.y += H; if (o.y > H) o.y -= H; }
+    return {
+      name: "ASTEROIDS", over: false, twoPlayer: false,
+      score() { return score; },
+      reset() {
+        ship = { x: W / 2, y: H / 2, a: -Math.PI / 2, vx: 0, vy: 0 };
+        bullets = []; score = 0; lives = 3; cool = 0; inv = 2; this.over = false; spawnWave(4);
+      },
+      step(dt, i0) {
+        inv -= dt; cool -= dt;
+        if (i0 & LEFT)  ship.a -= 3.2 * dt;
+        if (i0 & RIGHT) ship.a += 3.2 * dt;
+        if (i0 & UP) { ship.vx += Math.cos(ship.a) * 180 * dt; ship.vy += Math.sin(ship.a) * 180 * dt; }
+        ship.vx *= 0.99; ship.vy *= 0.99;
+        const sp = Math.hypot(ship.vx, ship.vy), max = 240;
+        if (sp > max) { ship.vx *= max / sp; ship.vy *= max / sp; }
+        ship.x += ship.vx * dt; ship.y += ship.vy * dt; wrap(ship);
+
+        if ((i0 & FIRE) && cool <= 0) {
+          bullets.push({
+            x: ship.x + Math.cos(ship.a) * 12, y: ship.y + Math.sin(ship.a) * 12,
+            vx: Math.cos(ship.a) * 340 + ship.vx, vy: Math.sin(ship.a) * 340 + ship.vy, life: 1.0
+          });
+          cool = 0.22;
+        }
+        for (const b of bullets) { b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt; wrap(b); }
+        bullets = bullets.filter(function (b) { return b.life > 0; });
+        for (const r of rocks) { r.x += r.vx * dt; r.y += r.vy * dt; wrap(r); }
+        for (let i = rocks.length - 1; i >= 0; i--) {
+          const r = rocks[i];
+          for (let j = bullets.length - 1; j >= 0; j--) {
+            const b = bullets[j];
+            if (Math.hypot(b.x - r.x, b.y - r.y) < r.r) {
+              bullets.splice(j, 1); rocks.splice(i, 1); score += (4 - r.size) * 20;
+              if (r.size > 1) { rocks.push(newRock(r.x, r.y, r.size - 1)); rocks.push(newRock(r.x, r.y, r.size - 1)); }
+              break;
+            }
+          }
+        }
+        if (!rocks.length) spawnWave(4 + ((score / 400) | 0));
+        if (inv <= 0) {
+          for (const r of rocks) {
+            if (Math.hypot(ship.x - r.x, ship.y - r.y) < r.r + 7) {
+              lives--; inv = 2; ship.x = W / 2; ship.y = H / 2; ship.vx = ship.vy = 0;
+              if (lives <= 0) this.over = true;
+              break;
+            }
+          }
+        }
+      },
+      draw() {
+        clear("#05070f");
+        text("ASTEROIDS", 12, 20, 14, "#7cffd0");
+        text("SCORE " + score, W / 2, 20, 14, "#cfe6ff", "center");
+        text("\u25b2 " + Math.max(0, lives), W - 12, 20, 14, "#9bffd0", "right");
+        for (const r of rocks) {
+          axx.strokeStyle = "#9fb6d8"; axx.lineWidth = 1.5; axx.beginPath();
+          for (let i = 0; i <= 9; i++) {
+            const a = (i / 9) * Math.PI * 2, rr = r.r * (0.78 + 0.22 * Math.abs(Math.sin(a * 3 + r.seed)));
+            const px = r.x + Math.cos(a) * rr, py = r.y + Math.sin(a) * rr;
+            if (i === 0) axx.moveTo(px, py); else axx.lineTo(px, py);
+          }
+          axx.closePath(); axx.stroke();
+        }
+        axx.fillStyle = "#fff";
+        for (const b of bullets) axx.fillRect(b.x - 1.5, b.y - 1.5, 3, 3);
+        if (inv <= 0 || (Math.floor(inv * 10) % 2 === 0)) {
+          axx.strokeStyle = "#9bffd0"; axx.lineWidth = 2; axx.beginPath();
+          axx.moveTo(ship.x + Math.cos(ship.a) * 12, ship.y + Math.sin(ship.a) * 12);
+          axx.lineTo(ship.x + Math.cos(ship.a + 2.4) * 9, ship.y + Math.sin(ship.a + 2.4) * 9);
+          axx.lineTo(ship.x + Math.cos(ship.a - 2.4) * 9, ship.y + Math.sin(ship.a - 2.4) * 9);
+          axx.closePath(); axx.stroke();
+        }
+        if (this.over) center("GAME OVER", H / 2, 22, "#ff5a7a");
+      }
+    };
+  })();
+
+  /* ===== MINESWEEPER ===== */
+  const Mines = (function () {
+    const N = 9, MINES = 10, cs = 26, ox = 86, oy = 48;
+    let grid, cur, dead, win, flags, revealedCount;
+    function build() {
+      grid = [];
+      for (let y = 0; y < N; y++) { grid.push([]); for (let x = 0; x < N; x++) grid[y].push({ m: false, r: false, f: false, n: 0 }); }
+      let placed = 0;
+      while (placed < MINES) { const x = (rnd() * N) | 0, y = (rnd() * N) | 0; if (!grid[y][x].m) { grid[y][x].m = true; placed++; } }
+      for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+        if (grid[y][x].m) continue;
+        let n = 0;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx, ny = y + dy;
+          if (nx >= 0 && nx < N && ny >= 0 && ny < N && grid[ny][nx].m) n++;
+        }
+        grid[y][x].n = n;
+      }
+    }
+    function reveal(x, y) {
+      const c = grid[y][x]; if (c.r || c.f) return; c.r = true; revealedCount++;
+      if (c.m) { dead = true; return; }
+      if (c.n === 0) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const nx = x + dx, ny = y + dy;
+        if (nx >= 0 && nx < N && ny >= 0 && ny < N && !grid[ny][nx].r) reveal(nx, ny);
+      }
+    }
+    const NCOL = ["", "#7cb0ff", "#7cffd0", "#ffe24e", "#ffb14e", "#ff8a5a", "#ff5a7a", "#ff3df0", "#ffffff"];
+    return {
+      name: "MINESWEEPER", over: false, twoPlayer: false,
+      score() { return revealedCount * 10 + (win ? 500 : 0); },
+      reset() { cur = { x: 4, y: 4 }; dead = false; win = false; flags = 0; revealedCount = 0; this.over = false; build(); },
+      // discrete: everything on the EDGE
+      step(dt, i0, i1, e0) {
+        if (e0 & UP)    cur.y = (cur.y + N - 1) % N;
+        if (e0 & DOWN)  cur.y = (cur.y + 1) % N;
+        if (e0 & LEFT)  cur.x = (cur.x + N - 1) % N;
+        if (e0 & RIGHT) cur.x = (cur.x + 1) % N;
+        if (e0 & (FIRE | GO)) { reveal(cur.x, cur.y); if (dead) this.over = true; }
+        if (e0 & FLAG) { const c = grid[cur.y][cur.x]; if (!c.r) { c.f = !c.f; flags += c.f ? 1 : -1; } }
+        if (!dead && revealedCount === N * N - MINES) { win = true; this.over = true; }
+      },
+      draw() {
+        clear();
+        text("MINESWEEPER", 12, 28, 15, "#7cffd0");
+        text("\u2691 " + (MINES - flags), W - 12, 28, 15, "#ffe24e", "right");
+        for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+          const c = grid[y][x], cx = ox + x * cs, cy = oy + y * cs;
+          axx.fillStyle = c.r ? (c.m ? "#ff5a7a" : "#1b2334") : "#2b3550";
+          axx.fillRect(cx + 1, cy + 1, cs - 2, cs - 2);
+          if (c.r && !c.m && c.n) {
+            axx.fillStyle = NCOL[c.n]; axx.font = "700 14px ui-monospace, monospace";
+            axx.textAlign = "center"; axx.textBaseline = "middle";
+            axx.fillText(String(c.n), cx + cs / 2, cy + cs / 2);
+            axx.textAlign = "left"; axx.textBaseline = "alphabetic";
+          }
+          if (c.f && !c.r) {
+            axx.fillStyle = "#ffe24e"; axx.font = "700 14px ui-monospace, monospace";
+            axx.textAlign = "center"; axx.textBaseline = "middle";
+            axx.fillText("\u2691", cx + cs / 2, cy + cs / 2);
+            axx.textAlign = "left"; axx.textBaseline = "alphabetic";
+          }
+          if (x === cur.x && y === cur.y) {
+            axx.strokeStyle = "#7cffd0"; axx.lineWidth = 2; axx.strokeRect(cx + 1, cy + 1, cs - 2, cs - 2);
+          }
+        }
+        text("arrows move \u00b7 space reveal \u00b7 F flag", W / 2, H - 8, 11, "rgba(200,220,255,0.5)", "center");
+        if (win) center("SWEPT! you win", H / 2, 22, "#ffe24e");
+        else if (dead) center("BOOM", H / 2, 22, "#ff5a7a");
+      }
+    };
+  })();
+
+  const games = [Snake, Breakout, Pong, G2048, Asteroids, Mines];
+
+  /* ================= LOCKSTEP NETCODE =================
+     Nobody streams pixels. Players broadcast their input bitmask a few frames
+     ahead; every machine — players and spectators alike — runs the identical
+     seeded simulation from the identical input stream. If an input hasn't landed
+     yet, we stall rather than guess, so we can never drift apart.
+     ==================================================== */
+  const DELAY = 8;          // frames of input delay (~133ms) — split evenly, so it's fair
+  const BATCH = 4;          // send 4 frames of input per packet: 15 packets/sec, not 60
+
+  const NETC = {
+    seat: null,     // id of whoever's at the cabinet (player 0)
+    p2:   null,     // id of the challenger (player 1)
+    mode: "solo",   // solo | versus | match
+    gi:   -1,       // game index
+    seed: 0,
+    turn: 0,        // match mode: whose turn (0 or 1)
+    scores: [null, null],
+    names: ["", ""],
+    hi: {}          // game name -> [{name, score}]
   };
 
-  /* ---- socket ---- */
-  function connect() {
-    stateEl.textContent = "connecting…";
-    try { ws = new WebSocket(RELAY); }
-    catch (e) { console.error("[chillroom] socket", e); schedule(); return; }
+  let frame = 0, acc = 0, running = false, stalled = false;
+  const buf = [new Map(), new Map()];   // per-player: frame -> bits
+  let prevBits = [0, 0];
+  let lastSent = -1, pending = [];      // batching
 
-    ws.onopen = function () {
-      connected = true; retry = 800;
-      stateEl.textContent = "connected";
-      send({ t: "join", name: myName, color: myColor });
-      send({ t: "ping", c: Date.now() });
-    };
-
-    ws.onclose = function () {
-      connected = false;
-      stateEl.textContent = "reconnecting…";
-      for (const p of peers.values()) scene.remove(p.av);
-      peers.clear(); drawRoster();
-      schedule();
-    };
-
-    ws.onerror = function () { try { ws.close(); } catch (e) {} };
-
-    ws.onmessage = function (ev) {
-      let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
-      let p;
-
-      switch (m.t) {
-        case "welcome":
-          myId = m.id; driver = m.driver;
-          skew = m.sv - Date.now();
-          for (const q of m.peers) addPeer(q);
-          if (m.media) applyMedia(m.media);
-          if (m.tick) setTimeout(function () { applyTick(m.tick); }, 500);
-          drawRoster();
-          break;
-
-        case "peer":
-          addPeer(m); drawRoster();
-          break;
-
-        case "left":
-          p = peers.get(m.id);
-          if (p) { scene.remove(p.av); peers.delete(m.id); }
-          drawRoster();
-          break;
-
-        case "pose":
-          p = peers.get(m.id);
-          if (p) { p.tx = m.x; p.tz = m.z; p.tyaw = m.yaw; }
-          break;
-
-        case "seat":
-          if (m.id === myId) {
-            if (m.denied) { mySeat = null; status("someone got there first"); }
-            else mySeat = m.seat;
-          } else {
-            p = peers.get(m.id);
-            if (p) p.seat = m.seat;
-          }
-          drawRoster();
-          break;
-
-        case "media":
-          driver = m.driver; applyMedia(m); drawRoster();
-          break;
-
-        case "tick":
-          applyTick(m);
-          break;
-
-        case "driver":
-          driver = m.id; drawRoster();
-          break;
-
-        case "chat":
-          logChat(m.name, m.color, m.msg);
-          p = peers.get(m.id);
-          if (p) sayOver(p.av, m.msg);
-          break;
-
-        case "pong":
-          skew = m.sv + (Date.now() - m.c) / 2 - Date.now();
-          break;
-      }
-    };
+  function myIndex() {
+    if (!NET || !NET.id) return -1;
+    if (NETC.seat === NET.id) return 0;
+    if (NETC.p2 === NET.id)   return 1;
+    return -1;
+  }
+  function iAmPlaying() {
+    const i = myIndex();
+    if (i < 0) return false;
+    if (NETC.mode === "match") return i === NETC.turn;   // only the player whose turn it is
+    if (NETC.mode === "versus") return true;             // both paddles live
+    return i === 0;
+  }
+  // who is actually feeding the sim right now
+  function activePlayers() {
+    if (NETC.mode === "versus") return [0, 1];
+    if (NETC.mode === "match")  return [NETC.turn];
+    return [0];
   }
 
-  function schedule() {
-    setTimeout(connect, retry);
-    retry = Math.min(retry * 1.7, 10000);
+  function startGame(gi, seed, mode, turn) {
+    NETC.gi = gi; NETC.seed = seed; NETC.mode = mode || "solo"; NETC.turn = turn || 0;
+    srand(seed);
+    game = games[gi];
+    game.reset();
+    frame = 0; acc = 0; running = true; stalled = false;
+    buf[0].clear(); buf[1].clear();
+    prevBits = [0, 0];
+    lastSent = -1; pending = [];
+    view = "game";
   }
 
-  function addPeer(q) {
-    if (peers.has(q.id)) return;
-    const av = buildAvatar(q.name || "guest", (q.color | 0) || 0x7cd1ff);
-    av.position.set(q.x, 0, q.z);
-    av.rotation.y = q.yaw + Math.PI;
-    peers.set(q.id, {
-      av: av,
-      name: q.name || "guest",
-      color: (q.color | 0) || 0x7cd1ff,
-      seat: (q.seat === undefined ? null : q.seat),
-      tx: q.x, tz: q.z, tyaw: q.yaw,
-      bodyYaw: q.yaw + Math.PI,
-      speed: 0
-    });
+  function endGame() {
+    running = false;
+    const s = game ? game.score() : 0;
+    const i = myIndex();
+    // only the player who was actually playing reports the score
+    if (i >= 0 && iAmPlaying()) NET.send({ t: "cab_score", i: i, g: game.name, s: s });
   }
 
-  connect();
+  function pushInput(bits) {
+    const target = frame + DELAY;
+    pending.push(bits);
+    if (pending.length >= BATCH) {
+      const start = target - pending.length + 1;
+      NET.send({ t: "cab_in", f: start, b: pending.slice() });
+      pending = [];
+    }
+  }
 
-  /* ---- per frame ---- */
-  function update(dt) {
-    updateCalls++;
-    const now = Date.now();
-    const t = now * 0.001;
+  // record inputs arriving from the wire (or from ourselves)
+  function feed(pi, startFrame, bitsArr) {
+    for (let k = 0; k < bitsArr.length; k++) buf[pi].set(startFrame + k, bitsArr[k]);
+  }
 
-    COZY.tick(t);
+  function bitsAt(pi, f) {
+    if (buf[pi].has(f)) return buf[pi].get(f);
+    return null;
+  }
 
-    /* --- me --- */
-    if (mySeat !== null) {
-      const s = SEATS[mySeat];
-      seatTarget.set(s.x, s.eye, s.z);
-      seatCam.lerp(seatTarget, K(0.16, dt));
-      player.copy(seatCam);
-      seatRing.material.opacity = 0;
+  function haveAllInputs(f) {
+    const act = activePlayers();
+    for (const pi of act) if (bitsAt(pi, f) === null) return false;
+    return true;
+  }
+
+  /* ---- menus ---- */
+  function drawMenu() {
+    clear("#070912");
+    center("JTC ARCADE", 46, 28, "#7cffd0");
+    axx.fillStyle = "rgba(124,255,208,0.18)"; axx.fillRect(60, 60, W - 120, 2);
+    for (let i = 0; i < games.length; i++) {
+      const y = 90 + i * 26;
+      if (i === sel) { axx.fillStyle = "rgba(124,176,255,0.18)"; axx.fillRect(50, y - 16, W - 100, 23); }
+      text((i === sel ? "\u25b8 " : "  ") + games[i].name, 70, y, 16, i === sel ? "#fff" : "#9fb6d8");
+      const hs = NETC.hi[games[i].name];
+      if (hs && hs.length) text(hs[0].name + " " + hs[0].score, W - 70, y, 12, "#5f7ba0", "right");
+    }
+    if (NETC.p2) {
+      const g = games[sel];
+      const label = g.twoPlayer ? "VERSUS" : "MATCH \u2014 same board, high score";
+      center(NETC.names[1] + " is in \u00b7 Enter = " + label, H - 30, 12, "#ffe24e");
+      center("J \u2014 drop them out", H - 14, 11, "rgba(200,220,255,0.45)");
     } else {
-      player.y = STAND_EYE;
-      const n = nearestSeat();
-      if (n >= 0) {
-        seatRing.position.set(SEATS[n].x, 0.07, SEATS[n].z);
-        seatRing.material.opacity = 0.3 + Math.sin(t * 5) * 0.12;
-      } else {
-        seatRing.material.opacity = 0;
-      }
-    }
-
-    /* --- broadcast my pose: ~15Hz when I move, plus a heartbeat --- */
-    poseAcc += dt; beatAcc += dt;
-    if (connected && poseAcc > 0.066) {
-      poseAcc = 0;
-      const moved = Math.abs(player.x - lastSent.x) > 0.015 ||
-                    Math.abs(player.z - lastSent.z) > 0.015 ||
-                    Math.abs(cam.yaw - lastSent.yaw) > 0.02;
-      if (moved || beatAcc > 0.5) {
-        beatAcc = 0;
-        send({
-          t: "pose",
-          x: +player.x.toFixed(2),
-          z: +player.z.toFixed(2),
-          yaw: +cam.yaw.toFixed(3)
-        });
-        lastSent = { x: player.x, z: player.z, yaw: cam.yaw };
-      }
-    }
-
-    tickAcc += dt;
-    if (tickAcc > 1) {
-      tickAcc = 0;
-      if (activeEl && driver === myId) pushTick(!activeEl.paused);
-      if (connected) send({ t: "ping", c: now });
-    }
-
-    /* --- everyone else --- */
-    for (const p of peers.values()) {
-      const av = p.av;
-
-      if (p.seat !== null && p.seat !== undefined) {
-        const s = SEATS[p.seat];
-        av.position.x += (s.x - av.position.x) * K(0.15, dt);
-        av.position.z += (s.z - av.position.z) * K(0.15, dt);
-        av.position.y += (s.av - av.position.y) * K(0.15, dt);
-        p.bodyYaw += shortAngle(p.bodyYaw, s.yaw + Math.PI) * K(0.15, dt);
-        av.rotation.y = p.bodyYaw;
-        p.speed = 0;
-        poseAvatar(av, true, dt, 0, p.bodyYaw, p.tyaw, t);
-        continue;
-      }
-
-      const px = av.position.x, pz = av.position.z;
-      av.position.x += (p.tx - px) * K(0.2, dt);
-      av.position.z += (p.tz - pz) * K(0.2, dt);
-      av.position.y += (0 - av.position.y) * K(0.2, dt);
-
-      const dx = av.position.x - px, dz = av.position.z - pz;
-      const inst = Math.hypot(dx, dz) / Math.max(dt, 0.001);
-      p.speed += (inst - p.speed) * K(0.25, dt);   // smooth it so the walk cycle isn't jittery
-
-      // face where you're WALKING when moving, where you're LOOKING when still.
-      // this is what makes them read as alive instead of sliding.
-      const target = p.speed > 0.3 ? Math.atan2(dx, dz) : (p.tyaw + Math.PI);
-      p.bodyYaw += shortAngle(p.bodyYaw, target) * K(p.speed > 0.3 ? 0.22 : 0.12, dt);
-      av.rotation.y = p.bodyYaw;
-
-      poseAvatar(av, false, dt, p.speed, p.bodyYaw, p.tyaw, t);
-    }
-
-    /* --- chat bubbles fade out --- */
-    for (const p of peers.values()) {
-      const b = p.av.userData.bubble;
-      if (!b) continue;
-      b.userData.life -= dt;
-      if (b.userData.life < 1) b.material.opacity = Math.max(0, b.userData.life);
-      if (b.userData.life <= 0) { p.av.remove(b); p.av.userData.bubble = null; }
+      center("Enter play \u00b7 Esc stand up", H - 26, 12, "rgba(200,220,255,0.55)");
+      center("someone else can press J at the cabinet to challenge you", H - 12, 10, "rgba(200,220,255,0.35)");
     }
   }
 
-  /* ---- the guard: if update() never fires, say so loudly ---- */
-  setTimeout(function () {
-    if (updateCalls === 0) {
-      loopWarn.style.display = "block";
-      console.error("[chillroom] NET.update(dt) is NOT being called from your frame loop.");
-    } else {
-      console.log("%c[chillroom] v2 running — " + updateCalls + " frames. T = chat, E = sit.",
-                  "color:#ffb870");
+  function drawSpectate() {
+    axx.fillStyle = "rgba(4,6,15,0.55)"; axx.fillRect(0, 0, W, 22);
+    const who = NETC.mode === "match" ? NETC.names[NETC.turn] : NETC.names[0];
+    text("\u25cf WATCHING " + (who || "?").toUpperCase(), 10, 16, 12, "#ff5a7a");
+    if (NETC.mode === "versus") text("VERSUS", W - 10, 16, 12, "#ffe24e", "right");
+    if (NETC.mode === "match")  text("MATCH \u00b7 round " + (NETC.turn + 1) + "/2", W - 10, 16, 12, "#ffe24e", "right");
+    if (myIndex() >= 0 && !iAmPlaying()) text("your turn next", W / 2, 16, 11, "#7cffd0", "center");
+  }
+
+  function drawStall() {
+    axx.fillStyle = "rgba(4,6,15,0.55)"; axx.fillRect(0, H / 2 - 16, W, 32);
+    center("\u2026 waiting for input", H / 2 + 5, 14, "#ffe24e");
+  }
+
+  function drawOver() {
+    axx.fillStyle = "rgba(4,6,15,0.78)"; axx.fillRect(0, 0, W, H);
+    center(game.name, 60, 22, "#fff");
+
+    if (NETC.mode === "match") {
+      const a = NETC.scores[0], b = NETC.scores[1];
+      center((NETC.names[0] || "P1").toUpperCase() + "   " + (a === null ? "\u2014" : a), 110, 18, "#7cffd0");
+      center((NETC.names[1] || "P2").toUpperCase() + "   " + (b === null ? "\u2014" : b), 138, 18, "#ff8aa0");
+      if (a !== null && b !== null) {
+        const w = a === b ? "DRAW" : (a > b ? (NETC.names[0] || "P1") + " TAKES IT" : (NETC.names[1] || "P2") + " TAKES IT");
+        center(w.toUpperCase(), 176, 20, "#ffe24e");
+        if (myIndex() === 0) center("Enter \u2014 run it back \u00b7 Esc \u2014 menu", H - 30, 13, "#7cffd0");
+      } else if (NETC.turn === 1) {
+        center((NETC.names[1] || "P2").toUpperCase() + " IS UP \u2014 same board", 176, 14, "#ffe24e");
+        if (myIndex() === 1) center("Enter \u2014 your turn", H - 30, 14, "#7cffd0");
+      }
+      return;
     }
-  }, 3000);
+
+    center("SCORE " + game.score(), 104, 18, "#7cffd0");
+    const hs = NETC.hi[game.name] || [];
+    if (hs.length) {
+      center("\u2014 HIGH SCORES \u2014", 138, 12, "rgba(200,220,255,0.5)");
+      for (let i = 0; i < Math.min(3, hs.length); i++) {
+        text((i + 1) + ". " + hs[i].name, 120, 162 + i * 20, 14, i === 0 ? "#ffe24e" : "#9fb6d8");
+        text(String(hs[i].score), W - 120, 162 + i * 20, 14, i === 0 ? "#ffe24e" : "#9fb6d8", "right");
+      }
+    }
+    if (myIndex() === 0) center("Enter \u2014 again \u00b7 Esc \u2014 games", H - 24, 13, "#7cffd0");
+  }
+
+  function drawAttract(dt) {
+    attractT += dt;
+    clear("#05070f");
+    axx.fillStyle = "rgba(124,176,255,0.5)";
+    for (let i = 0; i < 26; i++) { const x = ((i * 53 + attractT * 40) % W), y = (i * 37) % H; axx.fillRect(x, y, 2, 2); }
+    center("JTC ARCADE", 100, 34, "#7cffd0");
+    center("6 games \u00b7 all original", 132, 14, "#9fb6d8");
+    if (NETC.seat) {
+      center((NETC.names[0] || "someone").toUpperCase() + " IS PLAYING", 178, 16, "#ff5a7a");
+      center("click to watch \u00b7 J to challenge", 200, 12, "#ffe24e");
+    } else if ((attractT % 1.2) < 0.7) {
+      center("\u25b6  CLICK TO PLAY  \u25c0", 190, 18, "#ffe24e");
+    }
+    center("Snake \u00b7 Breakout \u00b7 Pong \u00b7 2048 \u00b7 Asteroids \u00b7 Mines", H - 16, 11, "rgba(200,220,255,0.5)");
+  }
+
+  /* ---- seat / stand / spectate ---- */
+  function engage() {
+    if (NETC.seat && NETC.seat !== NET.id) { spectate(); return; }
+    active = true; view = "menu"; sel = 0;
+    seatProg.copy(camera.position);
+    NET.send({ t: "cab_sit" });
+    status("ARCADE \u00b7 \u2191/\u2193 pick \u00b7 Enter play \u00b7 Esc stand up");
+  }
+  function spectate() {
+    active = true;
+    seatProg.copy(camera.position);
+    view = running ? "game" : "menu";
+    status("watching " + (NETC.names[0] || "the cabinet") + " \u00b7 J to challenge \u00b7 Esc to walk away");
+  }
+  function stand() {
+    active = false;
+    player.x = SEAT.pos.x; player.z = SEAT.pos.z; player.y = 2.3;
+    cam.yaw = -Math.PI / 2; cam.pitch = 0;
+    if (NETC.seat === NET.id || NETC.p2 === NET.id) NET.send({ t: "cab_stand" });
+  }
+  function click() { if (active) stand(); else engage(); }
+
+  function onKey(k) {
+    const iAmSeat = NETC.seat === NET.id;
+
+    if (k === "j") {
+      if (iAmSeat && NETC.p2) { NET.send({ t: "cab_drop" }); return; }        // seat: boot the challenger
+      if (!iAmSeat && NETC.seat && !NETC.p2) { NET.send({ t: "cab_challenge" }); return; }
+      return;
+    }
+
+    if (view === "menu") {
+      if (!iAmSeat) { if (k === "escape") stand(); return; }
+      if (k === "arrowup" || k === "w") sel = (sel + games.length - 1) % games.length;
+      else if (k === "arrowdown" || k === "s") sel = (sel + 1) % games.length;
+      else if (k === "enter") {
+        const g = games[sel];
+        const mode = !NETC.p2 ? "solo" : (g.twoPlayer ? "versus" : "match");
+        NET.send({ t: "cab_start", g: sel, seed: (Math.random() * 0xffffffff) >>> 0, mode: mode });
+      } else if (k === "escape") stand();
+      return;
+    }
+
+    // in-game
+    if (k === "escape") {
+      if (iAmSeat) { running = false; view = "menu"; NET.send({ t: "cab_menu" }); }
+      else stand();
+      return;
+    }
+
+    if (game && game.over && !running) {
+      if (k !== "enter") return;
+      if (NETC.mode === "match") {
+        // round 2: challenger plays the same board
+        if (NETC.turn === 0 && NETC.scores[0] !== null && myIndex() === 1) {
+          NET.send({ t: "cab_turn" });
+        } else if (iAmSeat && NETC.scores[0] !== null && NETC.scores[1] !== null) {
+          NET.send({ t: "cab_start", g: NETC.gi, seed: (Math.random() * 0xffffffff) >>> 0, mode: "match" });
+        }
+        return;
+      }
+      if (iAmSeat) NET.send({ t: "cab_start", g: NETC.gi, seed: (Math.random() * 0xffffffff) >>> 0, mode: NETC.mode });
+      return;
+    }
+  }
+
+  /* ---- the fixed-step simulation ---- */
+  function sim(dt) {
+    if (!running || !game) return;
+
+    // my own input goes in the buffer AND on the wire, scheduled DELAY frames out
+    if (iAmPlaying()) {
+      const bits = readLocalBits();
+      const target = frame + DELAY;
+      const pi = myIndex();
+      if (target > lastSent) {
+        buf[pi].set(target, bits);
+        pushInput(bits);
+        lastSent = target;
+      }
+    }
+
+    // spectators and idle players need no input of their own; if I'm player-but-not-my-turn,
+    // the sim still needs *someone's* input, and it comes off the wire.
+
+    acc += dt;
+    let guard = 0;
+    stalled = false;
+    while (acc >= FIXED && guard < 8) {
+      if (!haveAllInputs(frame)) { stalled = true; break; }   // stall, never guess
+      const i0 = bitsAt(0, frame) || 0;
+      const i1 = bitsAt(1, frame) || 0;
+      const e0 = i0 & ~prevBits[0];
+      const e1 = i1 & ~prevBits[1];
+      prevBits[0] = i0; prevBits[1] = i1;
+
+      if (!game.over) game.step(FIXED, i0, i1, e0, e1, NETC.mode === "versus");
+      if (game.over && running) { endGame(); break; }
+
+      buf[0].delete(frame - 120); buf[1].delete(frame - 120);
+      frame++; acc -= FIXED; guard++;
+    }
+    if (acc > 0.25) acc = 0.25;
+  }
+
+  function tick(dt) {
+    arcadeTex.needsUpdate = true; blink += dt;
+    if (arcadeGlow) arcadeGlow.intensity = active ? 1.1 : (0.45 + 0.25 * Math.sin(blink * 3));
+    if (active) seatCamera();
+
+    // the cabinet keeps simulating even when nobody in THIS browser is at it,
+    // so you can walk up mid-game and the screen is already live
+    sim(dt);
+
+    if (!active && !running) { drawAttract(dt); return; }
+
+    if (running && game) {
+      if (game.name === "PONG") game.draw(NETC.mode === "versus", NETC.names[0], NETC.names[1]);
+      else game.draw();
+      if (!iAmPlaying()) drawSpectate();
+      if (stalled) drawStall();
+      return;
+    }
+
+    if (game && game.over) { if (game.name === "PONG") game.draw(NETC.mode === "versus", NETC.names[0], NETC.names[1]); else game.draw(); drawOver(); return; }
+    if (!active) { drawAttract(dt); return; }
+    drawMenu();
+  }
+
+  /* ---- messages from the relay ---- */
+  function onNet(m) {
+    switch (m.t) {
+      case "cab_state":
+        NETC.seat  = m.seat;
+        NETC.p2    = m.p2;
+        NETC.names = m.names || ["", ""];
+        NETC.hi    = m.hi || {};
+        if (m.scores) NETC.scores = m.scores;
+        if (m.seat === null) { running = false; game = null; view = "menu"; }
+        break;
+
+      case "cab_start":
+        NETC.names  = m.names || NETC.names;
+        NETC.scores = [null, null];
+        startGame(m.g, m.seed, m.mode, 0);
+        break;
+
+      case "cab_turn":
+        // same seed, round two: the challenger takes the identical board
+        NETC.scores = m.scores;
+        startGame(NETC.gi, NETC.seed, "match", 1);
+        break;
+
+      case "cab_in":
+        if (m.p === myIndex()) break;   // never re-feed my own input
+        feed(m.p, m.f, m.b);
+        break;
+
+      case "cab_score":
+        NETC.scores = m.scores;
+        NETC.hi = m.hi || NETC.hi;
+        running = false;
+        break;
+
+      case "cab_menu":
+        running = false; game = null; view = "menu";
+        break;
+    }
+  }
 
   return {
-    update: update,
-    toggleSeat: toggleSeat,
-    send: send,
-    get seated()   { return mySeat !== null; },
-    get chatting() { return chatOpen; },
-    get id()       { return myId; }
+    engage: engage, stand: stand, click: click, onKey: onKey, tick: tick, onNet: onNet,
+    get active() { return active; },
+    get seated() { return NETC.seat; },
+    get occupied() { return !!NETC.seat; }
   };
 })();
+/* ===================== END JTC ARCADE BLOCK ===================== */
 
-/* ============================================================
-   THE TWO FRAME-LOOP EDITS
+    /* ============================================================
+       CHILLROOM — MULTIPLAYER + COZY
+       relay: chillroom-relay.dyshonjo.workers.dev
+       ============================================================ */
 
-   Down in  function frame() , change:
+    const RELAY = "wss://chillroom-relay.dyshonjo.workers.dev/ws";
 
-       const lock=arcade.active;
-   to
-       const lock=arcade.active || NET.seated || NET.chatting;
+    const AV_COLORS = [
+      0x7cd1ff, 0xff5a7a, 0x7cffd0, 0xffe24e, 0xff8a5a,
+      0x9b8bff, 0x6effa0, 0xff3df0, 0x5a8fd6, 0xffb14e
+    ];
 
-   and change:
+    const CINEMATIC = true;   // false if the film grade looks washed out on your monitor
 
-       drawScreen(t); drawWindow(dt); arcade.tick(dt);
-   to
-       drawScreen(t); drawWindow(dt); arcade.tick(dt); NET.update(dt);
+    function K(rate, dt) { return 1 - Math.pow(1 - rate, dt * 60); }
+    function shortAngle(from, to) {
+      let d = (to - from) % (Math.PI * 2);
+      if (d > Math.PI) d -= Math.PI * 2;
+      if (d < -Math.PI) d += Math.PI * 2;
+      return d;
+    }
 
-   If you miss the second one, a red box will tell you so.
-   ============================================================ */
-    
+    /* ---------------- COZY PASS ---------------- */
+    const COZY = (function () {
+
+      if (CINEMATIC) {
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.0;
+        // every screen, glow, poster and marquee is MeshBasicMaterial — keep them out of the grade
+        scene.traverse(function (o) {
+          if (o.material && o.material.isMeshBasicMaterial) o.material.toneMapped = false;
+        });
+      }
+
+      wallMat.color.set(0x17131c);
+      scene.background.set(0x120e16);
+      scene.fog.color.set(0x120e16);
+      scene.fog.near = 18; scene.fog.far = 44;
+
+      hemi.color.set(0x3a2f44);
+      hemi.groundColor.set(0x0d0810);
+      hemi.intensity = 0.34;
+      moon.color.set(0x8fa8ff);
+      moon.intensity = 0.30;
+
+      const rug2 = new THREE.Mesh(new THREE.BoxGeometry(9.6, 0.04, 7.4), toonMat(0x3d2438));
+      rug2.position.set(-1.2, 0.02, 1.2); rug2.receiveShadow = true; scene.add(rug2);
+      const rugTrim = new THREE.Mesh(new THREE.BoxGeometry(8.9, 0.05, 6.7), toonMat(0x5c3a54));
+      rugTrim.position.set(-1.2, 0.03, 1.2); scene.add(rugTrim);
+
+      /* coffee table + lava lamp + mug */
+      place(prop(new THREE.BoxGeometry(2.4, 0.12, 1.1), 0x5c4433, 0.03), -1.5, 0.94, 0.75);
+      [[-1.0,-0.42],[1.0,-0.42],[-1.0,0.42],[1.0,0.42]].forEach(function (o) {
+        place(prop(new THREE.BoxGeometry(0.1, 0.88, 0.1), 0x3f2e22, 0.06), -1.5 + o[0], 0.44, 0.75 + o[1]);
+      });
+      place(prop(new THREE.BoxGeometry(2.1, 0.06, 0.85), 0x4a3628, 0.04), -1.5, 0.36, 0.75);
+      place(prop(new THREE.CylinderGeometry(0.16, 0.2, 0.08, 12), 0x2a2d36, 0.06), -2.3, 1.04, 0.75);
+      const lava = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.09, 0.15, 0.55, 14),
+        new THREE.MeshBasicMaterial({ color: 0xff5a7a, transparent: true, opacity: 0.9, toneMapped: false })
+      );
+      lava.position.set(-2.3, 1.36, 0.75); scene.add(lava);
+      const lavaLight = new THREE.PointLight(0xff5a7a, 0.5, 5, 2);
+      lavaLight.position.set(-2.3, 1.4, 0.75); scene.add(lavaLight);
+      place(prop(new THREE.CylinderGeometry(0.08, 0.07, 0.14, 10), 0xd8dbe0, 0.06), -0.7, 1.07, 0.75);
+
+      /* LED bias strip behind the TV */
+      const bias = new THREE.Mesh(
+        new THREE.PlaneGeometry(7.6, 4.6),
+        new THREE.MeshBasicMaterial({ color: 0x5a3fd6, transparent: true, opacity: 0.55, toneMapped: false })
+      );
+      bias.position.set(0, 3.7, -RD / 2 + 0.17); scene.add(bias);
+      const biasLight = new THREE.PointLight(0x7a5aff, 0.9, 13, 2);
+      biasLight.position.set(0, 3.7, -RD / 2 + 0.9); scene.add(biasLight);
+
+      /* string lights */
+      const bulbs = [];
+      function stringRun(x1, z1, x2, z2, n, sag) {
+        for (let i = 0; i <= n; i++) {
+          const k = i / n;
+          const b = new THREE.Mesh(
+            new THREE.SphereGeometry(0.075, 8, 8),
+            new THREE.MeshBasicMaterial({ color: 0xffcf8a, toneMapped: false })
+          );
+          b.position.set(x1 + (x2 - x1) * k, RH - 0.4 - Math.sin(k * Math.PI) * sag, z1 + (z2 - z1) * k);
+          b.userData.phase = Math.random() * 6.28;
+          scene.add(b); bulbs.push(b);
+        }
+      }
+      stringRun(-RW/2 + 0.6, -RD/2 + 0.6,  RW/2 - 0.6, -RD/2 + 0.6, 9, 0.5);
+      stringRun(-RW/2 + 0.6, -RD/2 + 0.6, -RW/2 + 0.6,  RD/2 - 0.6, 8, 0.5);
+      stringRun( RW/2 - 0.6, -RD/2 + 0.6,  RW/2 - 0.6,  RD/2 - 0.6, 8, 0.5);
+
+      const fairyA = new THREE.PointLight(0xffb870, 0.5, 11, 2);
+      fairyA.position.set(-5.5, RH - 1.0, 0); scene.add(fairyA);
+      const fairyB = new THREE.PointLight(0xffb870, 0.5, 11, 2);
+      fairyB.position.set(5.5, RH - 1.0, 0); scene.add(fairyB);
+
+      /* plants */
+      function plant(x, z, s) {
+        place(prop(new THREE.CylinderGeometry(0.28, 0.36, 0.55, 10), 0x8a5a3c, 0.05), x, 0.28, z);
+        place(prop(new THREE.CylinderGeometry(0.3, 0.3, 0.06, 10), 0x3a2a1e, 0.05), x, 0.56, z);
+        place(prop(new THREE.CylinderGeometry(0.05, 0.07, 1.5, 6), 0x3f6b3a, 0.05), x, 1.3, z);
+        for (let i = 0; i < 7; i++) {
+          const a = (i / 7) * Math.PI * 2 + Math.random();
+          const leaf = place(prop(new THREE.BoxGeometry(0.62, 0.06, 0.34), 0x4f8a46, 0.06),
+            x + Math.cos(a) * 0.34, 1.2 + Math.random() * 1.0, z + Math.sin(a) * 0.34);
+          leaf.rotation.y = -a;
+          leaf.rotation.z = 0.35 + Math.random() * 0.25;
+          leaf.scale.setScalar(s);
+        }
+      }
+      plant(-6.1, 4.9, 1.0);
+      plant(6.2, -1.0, 0.9);
+
+      /* shelf above the TV */
+      place(prop(new THREE.BoxGeometry(3.0, 0.12, 0.42), 0x5c4433, 0.03), -1.5, 6.0, -RD/2 + 0.45);
+      const bookCols = [0xff5a7a, 0xffe24e, 0x7cffd0, 0x9b8bff, 0xff8a5a, 0x5a8fd6, 0x6effa0];
+      for (let i = 0; i < 9; i++) {
+        const h = 0.34 + Math.random() * 0.16;
+        const b = place(prop(new THREE.BoxGeometry(0.11, h, 0.3), bookCols[i % bookCols.length], 0.07),
+          -2.6 + i * 0.14, 6.1 + h / 2, -RD/2 + 0.45);
+        if (i === 7) b.rotation.z = 0.2;
+      }
+      place(prop(new THREE.BoxGeometry(0.5, 0.5, 0.35), 0x1d2028, 0.05), 0.0, 6.3, -RD/2 + 0.45);
+
+      const blanket = place(prop(new THREE.BoxGeometry(0.65, 0.9, 1.7), 0xd8a05a, 0.04), -3.35, 1.45, 2.6);
+      blanket.rotation.x = 0.06;
+
+      const rim = new THREE.PointLight(0xffb066, 0.45, 10, 2);
+      rim.position.set(-1.5, 4.6, 3.4); scene.add(rim);
+
+      function tick(t) {
+        const b = 0.85 + Math.sin(t * 0.9) * 0.15;
+        lava.scale.set(b, 1 / b, b);
+        lavaLight.intensity = 0.42 + Math.sin(t * 0.9) * 0.12;
+        lava.material.color.setHSL((0.93 + Math.sin(t * 0.15) * 0.06) % 1, 0.8, 0.62);
+        bias.material.color.setHSL((t * 0.02) % 1, 0.65, 0.42);
+        biasLight.color.setHSL((t * 0.02) % 1, 0.65, 0.6);
+        biasLight.intensity = power.tv ? 0.9 : 0.25;
+        for (const bl of bulbs) {
+          const f = 0.86 + Math.sin(t * 2.2 + bl.userData.phase) * 0.14;
+          bl.material.color.setRGB(f, 0.81 * f, 0.54 * f);
+        }
+      }
+      return { tick: tick };
+    })();
+
+    /* ---------------- SEATING FURNITURE ---------------- */
+    (function buildSeating() {
+      const bagA = place(prop(new THREE.SphereGeometry(0.85, 14, 10), 0xb84a55, 0.04), -4.9, 0.48, 2.2);
+      bagA.scale.set(1, 0.6, 1);
+      const bagB = place(prop(new THREE.SphereGeometry(0.85, 14, 10), 0x4a6bb8, 0.04), 1.9, 0.48, 2.4);
+      bagB.scale.set(1, 0.6, 1);
+      const bagC = place(prop(new THREE.SphereGeometry(0.8, 14, 10), 0x5aa87a, 0.04), 3.4, 0.45, 4.2);
+      bagC.scale.set(1, 0.6, 1);
+
+      const p1 = place(prop(new THREE.BoxGeometry(1.2, 0.34, 1.2), 0x8a5ab8, 0.05), -3.6, 0.18, -0.9);
+      p1.rotation.y = 0.24;
+      const p2 = place(prop(new THREE.BoxGeometry(1.2, 0.34, 1.2), 0xb8a05a, 0.05), 0.6, 0.18, -1.1);
+      p2.rotation.y = -0.31;
+
+      place(prop(new THREE.BoxGeometry(1.3, 0.75, 1.3), 0x2f5d57, 0.03), 4.3, 0.72, 1.4);
+      place(prop(new THREE.BoxGeometry(1.3, 1.15, 0.35), 0x356b64, 0.03), 4.3, 1.4, 1.95);
+      [[-0.55,0.55],[0.55,0.55],[-0.55,-0.55],[0.55,-0.55]].forEach(function (o) {
+        place(prop(new THREE.BoxGeometry(0.14, 0.35, 0.14), 0x24443f, 0.06), 4.3 + o[0], 0.18, 1.4 + o[1]);
+      });
+
+      const tp1 = place(prop(new THREE.BoxGeometry(0.55, 0.5, 0.2), 0xffb14e, 0.05), -3.05, 1.45, 3.05);
+      tp1.rotation.z = 0.18;
+      const tp2 = place(prop(new THREE.BoxGeometry(0.55, 0.5, 0.2), 0xff5a7a, 0.05), 0.15, 1.45, 3.05);
+      tp2.rotation.z = -0.14;
+    })();
+
+    /* ---------------- SEAT ANCHORS ----------------
+       index 9 is the arcade cabinet: a "virtual" seat. You can't sit in it with E —
+       you get put there automatically when you step up to the machine, so everyone
+       else sees you standing at the cabinet instead of frozen in the middle of the floor.
+    ------------------------------------------------ */
+    const SEATS = [
+      { label:"couch left",    x:-2.65, z: 2.45, yaw:Math.PI,       pitch:0.20, eye:1.95, av: 0.50, hy:1.15, hit:[1.05,1.5,1.4] },
+      { label:"couch middle",  x:-1.50, z: 2.45, yaw:Math.PI,       pitch:0.20, eye:1.95, av: 0.50, hy:1.15, hit:[1.05,1.5,1.4] },
+      { label:"couch right",   x:-0.35, z: 2.45, yaw:Math.PI,       pitch:0.20, eye:1.95, av: 0.50, hy:1.15, hit:[1.05,1.5,1.4] },
+      { label:"red beanbag",   x:-4.90, z: 2.20, yaw:Math.PI-0.40,  pitch:0.24, eye:1.70, av: 0.28, hy:0.70, hit:[1.7,1.5,1.7] },
+      { label:"blue beanbag",  x: 1.90, z: 2.40, yaw:Math.PI+0.28,  pitch:0.24, eye:1.70, av: 0.28, hy:0.70, hit:[1.7,1.5,1.7] },
+      { label:"green beanbag", x: 3.40, z: 4.20, yaw:Math.PI+0.48,  pitch:0.22, eye:1.68, av: 0.26, hy:0.68, hit:[1.6,1.5,1.6] },
+      { label:"floor pillow",  x:-3.60, z:-0.90, yaw:Math.PI,       pitch:0.32, eye:1.30, av:-0.28, hy:0.42, hit:[1.3,1.0,1.3] },
+      { label:"floor pillow",  x: 0.60, z:-1.10, yaw:Math.PI,       pitch:0.32, eye:1.30, av:-0.28, hy:0.42, hit:[1.3,1.0,1.3] },
+      { label:"lounge chair",  x: 4.30, z: 1.40, yaw:Math.PI-0.32,  pitch:0.20, eye:1.92, av: 0.45, hy:1.10, hit:[1.45,1.5,1.45] },
+      { label:"the arcade",    x:-4.75, z:-0.40, yaw:-Math.PI/2,    pitch:0.00, eye:2.90, av: 0.00, hy:0.00, hit:[0,0,0], virtual:true, standing:true }
+    ];
+    const ARCADE_SEAT = 9;
+
+    const SEAT_HITS = [];
+    SEATS.forEach(function (s, i) {
+      if (s.virtual) return;
+      const m = new THREE.Mesh(
+        new THREE.BoxGeometry(s.hit[0], s.hit[1], s.hit[2]),
+        new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, toneMapped: false })
+      );
+      m.position.set(s.x, s.hy, s.z);
+      m.userData.act = "seat";
+      m.userData.seat = i;
+      scene.add(m);
+      SEAT_HITS.push(m);
+    });
+
+    const seatRing = new THREE.Mesh(
+      new THREE.RingGeometry(0.5, 0.64, 26),
+      new THREE.MeshBasicMaterial({
+        color: 0x7cd1ff, transparent: true, opacity: 0,
+        side: THREE.DoubleSide, depthWrite: false, toneMapped: false
+      })
+    );
+    seatRing.rotation.x = -Math.PI / 2;
+    seatRing.position.y = 0.08;
+    scene.add(seatRing);
+
+    /* ---------------- AVATARS ---------------- */
+    function nameTag(name, colorHex) {
+      const c = document.createElement("canvas"); c.width = 256; c.height = 64;
+      const g = c.getContext("2d");
+      g.fillStyle = "rgba(10,12,20,0.8)"; g.fillRect(0, 14, 256, 36);
+      g.fillStyle = "#" + colorHex.toString(16).padStart(6, "0"); g.fillRect(0, 14, 5, 36);
+      g.fillStyle = "#eaf0ff"; g.font = "600 22px ui-monospace, monospace";
+      g.textAlign = "center"; g.textBaseline = "middle";
+      g.fillText(name, 130, 33);
+      const t = new THREE.CanvasTexture(c); t.encoding = THREE.sRGBEncoding;
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthTest: false, toneMapped: false }));
+      s.scale.set(1.15, 0.29, 1); s.position.y = 2.25; s.renderOrder = 999;
+      return s;
+    }
+
+    function chatBubble(msg) {
+      const c = document.createElement("canvas"); c.width = 384; c.height = 96;
+      const g = c.getContext("2d");
+      g.fillStyle = "rgba(16,20,32,0.92)"; g.fillRect(0, 0, 384, 76);
+      g.strokeStyle = "rgba(255,180,120,0.6)"; g.lineWidth = 2; g.strokeRect(1, 1, 382, 74);
+      g.beginPath(); g.moveTo(178, 75); g.lineTo(192, 94); g.lineTo(206, 75);
+      g.fillStyle = "rgba(16,20,32,0.92)"; g.fill();
+      g.fillStyle = "#dfe6f2"; g.font = "18px ui-monospace, monospace"; g.textAlign = "center";
+      const words = msg.split(" ");
+      let line = "", y = 30;
+      for (const w of words) {
+        const t = line + w + " ";
+        if (g.measureText(t).width > 350) { g.fillText(line, 192, y); line = w + " "; y += 24; if (y > 66) break; }
+        else line = t;
+      }
+      g.fillText(line, 192, y);
+      const tex = new THREE.CanvasTexture(c); tex.encoding = THREE.sRGBEncoding;
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, toneMapped: false }));
+      s.scale.set(1.9, 0.48, 1); s.position.y = 2.9; s.renderOrder = 1000;
+      s.userData.life = 6;
+      return s;
+    }
+
+    function buildAvatar(name, colorHex) {
+      const g = new THREE.Group();
+      const hips = new THREE.Group(); g.add(hips);
+
+      const torso = prop(new THREE.BoxGeometry(0.5, 0.75, 0.32), colorHex, 0.05);
+      torso.position.y = 1.05; hips.add(torso);
+
+      const head = prop(new THREE.BoxGeometry(0.38, 0.38, 0.36), 0xd9a877, 0.06);
+      head.position.y = 1.66; hips.add(head);
+
+      const brim = prop(new THREE.BoxGeometry(0.4, 0.06, 0.16), colorHex, 0.07);
+      brim.position.set(0, 0.1, 0.24); head.add(brim);
+
+      const armL = prop(new THREE.BoxGeometry(0.14, 0.6, 0.16), colorHex, 0.06);
+      const armR = prop(new THREE.BoxGeometry(0.14, 0.6, 0.16), colorHex, 0.06);
+      armL.position.set(-0.33, 1.08, 0); armR.position.set(0.33, 1.08, 0);
+      hips.add(armL); hips.add(armR);
+
+      const legL = prop(new THREE.BoxGeometry(0.18, 0.7, 0.2), 0x1d2130, 0.06);
+      const legR = prop(new THREE.BoxGeometry(0.18, 0.7, 0.2), 0x1d2130, 0.06);
+      legL.position.set(-0.13, 0.35, 0); legR.position.set(0.13, 0.35, 0);
+      g.add(legL); g.add(legR);
+
+      g.add(nameTag(name, colorHex));
+      g.userData.parts  = { hips:hips, torso:torso, head:head, legL:legL, legR:legR, armL:armL, armR:armR };
+      g.userData.bubble = null;
+      g.userData.walk   = 0;
+      g.userData.phase  = Math.random() * 6.28;
+      scene.add(g);
+      return g;
+    }
+
+    /* mode: "walk" | "sit" | "stand"  (stand = at the cabinet, upright, hands on the deck) */
+    function poseAvatar(av, mode, dt, speed, bodyYaw, lookYaw, t) {
+      const p  = av.userData.parts;
+      const ph = av.userData.phase;
+      const breath = Math.sin(t * 1.5 + ph) * 0.012;
+
+      const headTurn = THREE.MathUtils.clamp(shortAngle(bodyYaw, lookYaw + Math.PI), -0.7, 0.7);
+      p.head.rotation.y += (headTurn - p.head.rotation.y) * K(0.2, dt);
+
+      if (mode === "sit") {
+        p.legL.rotation.x = Math.PI / 2; p.legR.rotation.x = Math.PI / 2;
+        p.legL.position.set(-0.13, 0.62, 0.28);
+        p.legR.position.set( 0.13, 0.62, 0.28);
+        p.armL.rotation.x = 0.4;  p.armR.rotation.x = 0.4;
+        p.armL.rotation.z = 0.12; p.armR.rotation.z = -0.12;
+        p.hips.rotation.x = 0;
+        p.hips.position.y = breath * 0.6;
+        av.userData.walk = 0;
+        return;
+      }
+
+      if (mode === "stand") {
+        // upright at the cabinet, arms up on the control deck, weight shifting
+        p.legL.rotation.x = 0; p.legR.rotation.x = 0;
+        p.legL.position.set(-0.13, 0.35, 0);
+        p.legR.position.set( 0.13, 0.35, 0);
+        p.armL.rotation.x = -1.1 + Math.sin(t * 3.1 + ph) * 0.06;
+        p.armR.rotation.x = -1.1 + Math.sin(t * 3.7 + ph) * 0.06;
+        p.armL.rotation.z = 0.18; p.armR.rotation.z = -0.18;
+        p.hips.rotation.x = 0.05;
+        p.hips.position.y = breath;
+        av.userData.walk = 0;
+        return;
+      }
+
+      const walking = speed > 0.25;
+      av.userData.walk += (walking ? speed : 0) * dt * 4.2;
+      const sw  = walking ? Math.sin(av.userData.walk) * Math.min(0.62, 0.28 + speed * 0.09) : 0;
+      const bob = walking ? Math.abs(Math.sin(av.userData.walk)) * 0.045 : 0;
+
+      p.legL.rotation.x = sw;  p.legR.rotation.x = -sw;
+      p.legL.position.set(-0.13, 0.35, 0);
+      p.legR.position.set( 0.13, 0.35, 0);
+      p.armL.rotation.x = -sw * 0.85; p.armR.rotation.x = sw * 0.85;
+      p.armL.rotation.z = 0.06; p.armR.rotation.z = -0.06;
+
+      const lean = THREE.MathUtils.clamp(speed * 0.035, 0, 0.16);
+      p.hips.rotation.x += (lean - p.hips.rotation.x) * K(0.15, dt);
+      p.hips.position.y  = bob + breath;
+    }
+
+    function sayOver(av, msg) {
+      if (av.userData.bubble) av.remove(av.userData.bubble);
+      const b = chatBubble(msg);
+      av.add(b);
+      av.userData.bubble = b;
+    }
+
+    /* ---------------- HUD ---------------- */
+    const hud = document.createElement("div");
+    hud.innerHTML =
+    '<style>' +
+    '#net{position:fixed;right:14px;top:14px;z-index:12;width:216px;font-family:ui-monospace,monospace;font-size:11px;color:#eae6f0}' +
+    '#net .panel{background:rgba(18,15,24,.78);border:1px solid rgba(255,180,120,.22);border-radius:10px;padding:9px 11px;backdrop-filter:blur(8px);margin-bottom:8px}' +
+    '#net .hdr{font-size:10px;letter-spacing:.18em;text-transform:uppercase;opacity:.5;margin-bottom:6px}' +
+    '#net .row{display:flex;align-items:center;gap:7px;padding:2px 0}' +
+    '#net .dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}' +
+    '#net .who{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+    '#net .badge{font-size:9px;opacity:.55}' +
+    '#chatpanel{cursor:pointer}#chatpanel:hover{border-color:rgba(255,180,120,.6)}' +
+    '#chatlog{min-height:20px;max-height:150px;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end}' +
+    '#chatlog div{padding:1px 0;line-height:1.35;opacity:.9}' +
+    '#namein{width:100%;background:rgba(28,22,34,.85);border:1px solid rgba(255,180,120,.32);color:#eae6f0;border-radius:7px;padding:5px 7px;font:11px ui-monospace,monospace;outline:none}' +
+    '#chatin{position:fixed;left:50%;bottom:104px;transform:translateX(-50%);z-index:14;width:420px;max-width:88vw;display:none;background:rgba(18,15,24,.95);border:1px solid rgba(255,180,120,.65);color:#eae6f0;border-radius:9px;padding:10px 12px;font:12px ui-monospace,monospace;outline:none;backdrop-filter:blur(8px)}' +
+    '#netstate{position:fixed;right:14px;bottom:14px;z-index:12;font:10px ui-monospace,monospace;letter-spacing:.1em;text-transform:uppercase;opacity:.55;color:#ffb870}' +
+    '</style>' +
+    '<div id="net">' +
+      '<div class="panel"><div class="hdr">In the cave</div><div id="roster"></div></div>' +
+      '<div class="panel" id="chatpanel"><div class="hdr">Chat &middot; press T</div><div id="chatlog"></div></div>' +
+      '<div class="panel"><input id="namein" maxlength="16" placeholder="your name" /></div>' +
+    '</div>' +
+    '<input id="chatin" maxlength="160" placeholder="say something — enter to send, esc to cancel" />' +
+    '<div id="netstate">connecting…</div>';
+    document.body.appendChild(hud);
+
+    const rosterEl  = document.getElementById("roster");
+    const chatlogEl = document.getElementById("chatlog");
+    const nameEl    = document.getElementById("namein");
+    const chatEl    = document.getElementById("chatin");
+    const stateEl   = document.getElementById("netstate");
+    const chatPanel = document.getElementById("chatpanel");
+
+    function logChat(name, colorHex, msg) {
+      const d = document.createElement("div");
+      const hex = "#" + (((colorHex | 0) || 0x7cd1ff)).toString(16).padStart(6, "0");
+      d.innerHTML = '<span style="color:' + hex + '">' + name + '</span> ' +
+                    '<span style="opacity:.85">' + msg.replace(/[<>&]/g, "") + '</span>';
+      chatlogEl.appendChild(d);
+      while (chatlogEl.children.length > 9) chatlogEl.removeChild(chatlogEl.firstChild);
+    }
+
+    /* ---------------- NETWORK ---------------- */
+    const NET = (function () {
+      let ws = null, myId = null, driver = null, skew = 0;
+      let connected = false, retry = 800;
+      const peers = new Map();
+
+      let mySeat = null;
+      let myName = "", myColor = AV_COLORS[(Math.random() * AV_COLORS.length) | 0];
+      const STAND_EYE = 2.3;
+      const seatCam = new THREE.Vector3();
+      const seatTarget = new THREE.Vector3();
+
+      let poseAcc = 0, tickAcc = 0, beatAcc = 0;
+      let lastSent = { x: 1e9, z: 1e9, yaw: 1e9 };
+      let applying = false;
+      let chatOpen = false;
+
+      try {
+        myName = localStorage.getItem("cr_name") || ("guest" + ((Math.random() * 90 + 10) | 0));
+        const c = +localStorage.getItem("cr_color");
+        if (c) myColor = c;
+      } catch (e) { myName = "guest" + ((Math.random() * 90 + 10) | 0); }
+
+      nameEl.value = myName;
+      nameEl.addEventListener("change", function () {
+        myName = (nameEl.value || "guest").slice(0, 16);
+        try {
+          localStorage.setItem("cr_name", myName);
+          localStorage.setItem("cr_color", String(myColor));
+        } catch (e) {}
+        send({ t: "join", name: myName, color: myColor });
+        drawRoster();
+      });
+
+      function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+
+      function drawRoster() {
+        const rows = [[myId || "me", myName, myColor, mySeat, true]];
+        for (const kv of peers) rows.push([kv[0], kv[1].name, kv[1].color, kv[1].seat, false]);
+        rosterEl.innerHTML = rows.map(function (r) {
+          const id = r[0], n = r[1], c = r[2], seat = r[3], isMe = r[4];
+          const hex = "#" + (((c | 0) || 0x7cd1ff)).toString(16).padStart(6, "0");
+          const where = (seat !== null && seat !== undefined) ? SEATS[seat].label : "standing";
+          const drv = (driver && driver === id) ? ' <span class="badge">&#9654;</span>' : "";
+          return '<div class="row"><div class="dot" style="background:' + hex + '"></div>' +
+                 '<div class="who">' + n + (isMe ? " (you)" : "") + '</div>' +
+                 '<div class="badge">' + where + '</div>' + drv + '</div>';
+        }).join("");
+      }
+
+      /* ---- media ---- */
+      const _playVideo = playVideo, _playAudio = playAudio, _showEmbed = showEmbed;
+
+      function share(action, url) {
+        if (applying) return;
+        if (typeof url === "string" && url.indexOf("blob:") === 0) {
+          status("local file — only you can see that. paste a link to share it with the room");
+          return;
+        }
+        send({ t: "media", action: action, url: url });
+      }
+
+      playVideo = function (u) { _playVideo(u); share("video", u); };
+      playAudio = function (u) { _playAudio(u); share("audio", u); };
+      showEmbed = function (u) { _showEmbed(u); share("embed", u); };
+
+      function localStop() {
+        if (activeEl) { activeEl.pause(); try { activeEl.currentTime = 0; } catch (e) {} }
+        clearEmbed();
+        TV.material.map = screenTex; TV.material.needsUpdate = true;
+        videoTex = null; mode = "idle"; activeEl = null;
+      }
+
+      function applyMedia(m) {
+        applying = true;
+        try {
+          if (m.action === "video")      playVideo(m.url);
+          else if (m.action === "audio") playAudio(m.url);
+          else if (m.action === "embed") showEmbed(m.url);
+          else if (m.action === "stop")  localStop();
+        } catch (e) { console.error("[chillroom] media", e); }
+        applying = false;
+        if (m.by && m.driver !== myId) status(m.by + " put something on");
+      }
+
+      function applyTick(tk) {
+        if (!activeEl) return;
+        const now = Date.now() + skew;
+        const expect = tk.state === "play" ? tk.time + (now - tk.sv) / 1000 : tk.time;
+        if (Math.abs(activeEl.currentTime - expect) > 0.6) {
+          try { activeEl.currentTime = expect; } catch (e) {}
+        }
+        if (tk.state === "play"  && activeEl.paused)  activeEl.play().catch(function () {});
+        if (tk.state === "pause" && !activeEl.paused) activeEl.pause();
+      }
+
+      function pushTick(playing) {
+        if (!activeEl || driver !== myId) return;
+        send({ t: "tick", state: playing ? "play" : "pause", time: activeEl.currentTime });
+      }
+
+      document.getElementById("bplay").addEventListener("click",  function () { pushTick(true); });
+      document.getElementById("bpause").addEventListener("click", function () { pushTick(false); });
+      document.getElementById("bstop").addEventListener("click",  function () {
+        if (!applying) send({ t: "media", action: "stop" });
+      });
+
+      /* ---- seats ---- */
+      function seatTaken(i) {
+        for (const p of peers.values()) if (p.seat === i) return true;
+        return false;
+      }
+
+      function toggleSeat(i) {
+        if (mySeat === i) {
+          send({ t: "seat", seat: null });
+          const s = SEATS[i];
+          mySeat = null;
+          player.set(
+            THREE.MathUtils.clamp(s.x - Math.sin(s.yaw) * 1.5, -RW/2 + 1, RW/2 - 1),
+            STAND_EYE,
+            THREE.MathUtils.clamp(s.z - Math.cos(s.yaw) * 1.5, -RD/2 + 1, RD/2 - 1)
+          );
+          cam.pitch = -0.05;
+          status("standing");
+        } else {
+          if (seatTaken(i)) { status(SEATS[i].label + " is taken"); return; }
+          send({ t: "seat", seat: i });
+          mySeat = i;
+          seatCam.copy(camera.position);
+          cam.yaw   = SEATS[i].yaw;
+          cam.pitch = SEATS[i].pitch;
+          status("sat down · " + SEATS[i].label + " — E or click to get up");
+        }
+        drawRoster();
+      }
+
+      // the arcade drives this one: you don't choose it, you just walk up to the machine
+      function setArcadeSeat(on) {
+        if (on && mySeat !== ARCADE_SEAT) {
+          if (mySeat !== null) send({ t: "seat", seat: null });
+          mySeat = ARCADE_SEAT;
+          send({ t: "seat", seat: ARCADE_SEAT });
+          drawRoster();
+        } else if (!on && mySeat === ARCADE_SEAT) {
+          mySeat = null;
+          send({ t: "seat", seat: null });
+          drawRoster();
+        }
+      }
+
+      function nearestSeat() {
+        let best = -1, bd = 1.9;
+        for (let i = 0; i < SEATS.length; i++) {
+          if (SEATS[i].virtual || seatTaken(i)) continue;
+          const d = Math.hypot(player.x - SEATS[i].x, player.z - SEATS[i].z);
+          if (d < bd) { bd = d; best = i; }
+        }
+        return best;
+      }
+
+      /* ---- chat ---- */
+      function openChat()  { chatOpen = true;  chatEl.style.display = "block"; chatEl.value = ""; chatEl.focus(); }
+      function closeChat() { chatOpen = false; chatEl.style.display = "none";  chatEl.blur(); }
+      chatPanel.addEventListener("click", openChat);
+
+      window.addEventListener("keydown", function (e) {
+        if (chatOpen) {
+          e.stopImmediatePropagation();
+          if (e.key === "Enter") {
+            const m = chatEl.value.trim();
+            if (m) { send({ t: "chat", msg: m }); logChat(myName, myColor, m); }
+            closeChat();
+          } else if (e.key === "Escape") closeChat();
+          return;
+        }
+        if (document.activeElement === nameEl) { e.stopImmediatePropagation(); return; }
+        if (arcade.active) return;   // the cabinet owns the keyboard while you're at it
+
+        const k = e.key.toLowerCase();
+        if (k === "t") {
+          e.preventDefault(); e.stopImmediatePropagation();
+          openChat();
+        } else if (k === "e") {
+          e.preventDefault(); e.stopImmediatePropagation();
+          if (mySeat !== null && mySeat !== ARCADE_SEAT) toggleSeat(mySeat);
+          else if (mySeat === null) {
+            const s = nearestSeat();
+            if (s >= 0) toggleSeat(s);
+            else status("walk up to a seat first");
+          }
+        } else if (k === "j") {
+          // challenge whoever's on the cabinet, from across the room
+          if (arcade.occupied) { e.stopImmediatePropagation(); arcade.onKey("j"); }
+        }
+      }, true);
+
+      /* ---- clicks: seats first, then everything that was already clickable ---- */
+      const _hitList  = hitList;
+      const _tryClick = tryClick;
+
+      hitList = function () { return _hitList().concat(SEAT_HITS); };
+
+      tryClick = function (cx, cy) {
+        ndc.x = (cx / window.innerWidth) * 2 - 1;
+        ndc.y = -(cy / window.innerHeight) * 2 + 1;
+        ray.setFromCamera(ndc, camera);
+        const hit = ray.intersectObjects(SEAT_HITS, false)[0];
+        if (hit) { toggleSeat(hit.object.userData.seat); return; }
+        _tryClick(cx, cy);
+      };
+
+      /* ---- socket ---- */
+      function connect() {
+        stateEl.textContent = "connecting…";
+        try { ws = new WebSocket(RELAY); }
+        catch (e) { console.error("[chillroom] socket", e); schedule(); return; }
+
+        ws.onopen = function () {
+          connected = true; retry = 800;
+          stateEl.textContent = "connected";
+          send({ t: "join", name: myName, color: myColor });
+          send({ t: "ping", c: Date.now() });
+        };
+
+        ws.onclose = function () {
+          connected = false;
+          stateEl.textContent = "reconnecting…";
+          for (const p of peers.values()) scene.remove(p.av);
+          peers.clear(); drawRoster();
+          schedule();
+        };
+
+        ws.onerror = function () { try { ws.close(); } catch (e) {} };
+
+        ws.onmessage = function (ev) {
+          let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+          let p;
+
+          // everything cab_* belongs to the arcade
+          if (m.t.indexOf("cab_") === 0) { arcade.onNet(m); return; }
+
+          switch (m.t) {
+            case "welcome":
+              myId = m.id; driver = m.driver;
+              skew = m.sv - Date.now();
+              for (const q of m.peers) addPeer(q);
+              if (m.media) applyMedia(m.media);
+              if (m.tick) setTimeout(function () { applyTick(m.tick); }, 600);
+              if (m.cab) arcade.onNet(m.cab);
+              drawRoster();
+              break;
+
+            case "peer":  addPeer(m); drawRoster(); break;
+
+            case "left":
+              p = peers.get(m.id);
+              if (p) { scene.remove(p.av); peers.delete(m.id); }
+              drawRoster();
+              break;
+
+            case "pose":
+              p = peers.get(m.id);
+              if (p) { p.tx = m.x; p.tz = m.z; p.tyaw = m.yaw; }
+              break;
+
+            case "seat":
+              if (m.id === myId) {
+                if (m.denied) { mySeat = null; status("someone got there first"); }
+                else mySeat = m.seat;
+              } else {
+                p = peers.get(m.id);
+                if (p) p.seat = m.seat;
+              }
+              drawRoster();
+              break;
+
+            case "media":  driver = m.driver; applyMedia(m); drawRoster(); break;
+            case "tick":   applyTick(m); break;
+            case "driver": driver = m.id; drawRoster(); break;
+
+            case "chat":
+              logChat(m.name, m.color, m.msg);
+              p = peers.get(m.id);
+              if (p) sayOver(p.av, m.msg);
+              break;
+
+            case "pong":
+              skew = m.sv + (Date.now() - m.c) / 2 - Date.now();
+              break;
+          }
+        };
+      }
+
+      function schedule() {
+        setTimeout(connect, retry);
+        retry = Math.min(retry * 1.7, 10000);
+      }
+
+      function addPeer(q) {
+        if (peers.has(q.id)) return;
+        const av = buildAvatar(q.name || "guest", (q.color | 0) || 0x7cd1ff);
+        av.position.set(q.x, 0, q.z);
+        av.rotation.y = q.yaw + Math.PI;
+        peers.set(q.id, {
+          av: av,
+          name: q.name || "guest",
+          color: (q.color | 0) || 0x7cd1ff,
+          seat: (q.seat === undefined ? null : q.seat),
+          tx: q.x, tz: q.z, tyaw: q.yaw,
+          bodyYaw: q.yaw + Math.PI,
+          speed: 0
+        });
+      }
+
+      connect();
+
+      /* ---- per frame ---- */
+      function update(dt) {
+        const now = Date.now();
+        const t = now * 0.001;
+
+        COZY.tick(t);
+
+        // the arcade owns your body while you're at the machine
+        setArcadeSeat(arcade.active);
+
+        if (arcade.active) {
+          const s = SEATS[ARCADE_SEAT];
+          player.set(s.x, s.eye, s.z);     // so the pose we broadcast puts us at the cabinet
+          seatRing.material.opacity = 0;
+        } else if (mySeat !== null) {
+          const s = SEATS[mySeat];
+          seatTarget.set(s.x, s.eye, s.z);
+          seatCam.lerp(seatTarget, K(0.16, dt));
+          player.copy(seatCam);
+          seatRing.material.opacity = 0;
+        } else {
+          player.y = STAND_EYE;
+          const n = nearestSeat();
+          if (n >= 0) {
+            seatRing.position.set(SEATS[n].x, 0.08, SEATS[n].z);
+            seatRing.material.opacity = 0.3 + Math.sin(t * 5) * 0.12;
+          } else {
+            seatRing.material.opacity = 0;
+          }
+        }
+
+        /* broadcast my pose ~15Hz, plus a half-second heartbeat */
+        poseAcc += dt; beatAcc += dt;
+        if (connected && poseAcc > 0.066) {
+          poseAcc = 0;
+          const yaw = arcade.active ? SEATS[ARCADE_SEAT].yaw : cam.yaw;
+          const moved = Math.abs(player.x - lastSent.x) > 0.015 ||
+                        Math.abs(player.z - lastSent.z) > 0.015 ||
+                        Math.abs(yaw - lastSent.yaw) > 0.02;
+          if (moved || beatAcc > 0.5) {
+            beatAcc = 0;
+            send({ t: "pose", x: +player.x.toFixed(2), z: +player.z.toFixed(2), yaw: +yaw.toFixed(3) });
+            lastSent = { x: player.x, z: player.z, yaw: yaw };
+          }
+        }
+
+        tickAcc += dt;
+        if (tickAcc > 1) {
+          tickAcc = 0;
+          if (activeEl && driver === myId) pushTick(!activeEl.paused);
+          if (connected) send({ t: "ping", c: now });
+        }
+
+        /* everyone else */
+        for (const p of peers.values()) {
+          const av = p.av;
+          const seated = (p.seat !== null && p.seat !== undefined);
+
+          if (seated) {
+            const s = SEATS[p.seat];
+            av.position.x += (s.x  - av.position.x) * K(0.15, dt);
+            av.position.z += (s.z  - av.position.z) * K(0.15, dt);
+            av.position.y += (s.av - av.position.y) * K(0.15, dt);
+            p.bodyYaw += shortAngle(p.bodyYaw, s.yaw + Math.PI) * K(0.15, dt);
+            av.rotation.y = p.bodyYaw;
+            p.speed = 0;
+            poseAvatar(av, s.standing ? "stand" : "sit", dt, 0, p.bodyYaw, p.tyaw, t);
+            continue;
+          }
+
+          const px = av.position.x, pz = av.position.z;
+          av.position.x += (p.tx - px) * K(0.2, dt);
+          av.position.z += (p.tz - pz) * K(0.2, dt);
+          av.position.y += (0 - av.position.y) * K(0.2, dt);
+
+          const dx = av.position.x - px, dz = av.position.z - pz;
+          const inst = Math.hypot(dx, dz) / Math.max(dt, 0.001);
+          p.speed += (inst - p.speed) * K(0.25, dt);
+
+          // face where you're WALKING when moving, where you're LOOKING when still
+          const target = p.speed > 0.3 ? Math.atan2(dx, dz) : (p.tyaw + Math.PI);
+          p.bodyYaw += shortAngle(p.bodyYaw, target) * K(p.speed > 0.3 ? 0.22 : 0.12, dt);
+          av.rotation.y = p.bodyYaw;
+
+          poseAvatar(av, "walk", dt, p.speed, p.bodyYaw, p.tyaw, t);
+        }
+
+        for (const p of peers.values()) {
+          const b = p.av.userData.bubble;
+          if (!b) continue;
+          b.userData.life -= dt;
+          if (b.userData.life < 1) b.material.opacity = Math.max(0, b.userData.life);
+          if (b.userData.life <= 0) { p.av.remove(b); p.av.userData.bubble = null; }
+        }
+      }
+
+      console.log("%c[chillroom] loaded — T chat · E sit · click the cabinet · J to challenge",
+                  "color:#ffb870");
+
+      return {
+        update: update,
+        toggleSeat: toggleSeat,
+        send: send,
+        get seated()   { return mySeat !== null && mySeat !== ARCADE_SEAT; },
+        get chatting() { return chatOpen; },
+        get id()       { return myId; }
+      };
+    })();
+
     // ---------- controls ----------
     const cam={yaw:Math.PI,pitch:-0.05}, keys={};
     const player=new THREE.Vector3(0,2.3,4.6);
@@ -1469,6 +2240,13 @@ const NET = (function () {
     });
     window.addEventListener("keydown",function(e){ keys[e.key.toLowerCase()]=true; });
     window.addEventListener("keyup",function(e){ keys[e.key.toLowerCase()]=false; });
+    window.addEventListener("keydown",function(e){
+      if(!arcade.active) return;
+      if(NET.chatting) return;
+      var k=e.key.toLowerCase();
+      if(k==="arrowup"||k==="arrowdown"||k==="arrowleft"||k==="arrowright"||k===" "||k==="spacebar"||k==="enter") e.preventDefault();
+      arcade.onKey(k);
+    });
     window.addEventListener("resize",function(){
       camera.aspect=window.innerWidth/window.innerHeight; camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth,window.innerHeight);
@@ -1479,21 +2257,25 @@ const NET = (function () {
     const clock=new THREE.Clock(); const SPEED=5; applyPower();
     function frame(){
       const dt=Math.min(clock.getDelta(),0.05), t=clock.elapsedTime;
-      const fwd=(keys["s"]||keys["arrowdown"]?1:0)-(keys["w"]||keys["arrowup"]?1:0);
-      const str=(keys["a"]||keys["arrowleft"]?1:0)-(keys["d"]||keys["arrowright"]?1:0);
+      NET.update(dt);
+      const lock=arcade.active || NET.seated || NET.chatting;
+      const fwd=lock?0:((keys["s"]||keys["arrowdown"]?1:0)-(keys["w"]||keys["arrowup"]?1:0));
+      const str=lock?0:((keys["a"]||keys["arrowleft"]?1:0)-(keys["d"]||keys["arrowright"]?1:0));
       const s=Math.sin(cam.yaw), c=Math.cos(cam.yaw);
       player.x+=(fwd*-s+str*c)*SPEED*dt; player.z+=(fwd*-c-str*s)*SPEED*dt;
       player.x=THREE.MathUtils.clamp(player.x,-RW/2+1,RW/2-1);
       player.z=THREE.MathUtils.clamp(player.z,-RD/2+1,RD/2-1);
-      camera.position.copy(player);
-      camera.lookAt(
-        player.x+Math.sin(cam.yaw)*Math.cos(cam.pitch),
-        player.y+Math.sin(cam.pitch),
-        player.z+Math.cos(cam.yaw)*Math.cos(cam.pitch)
-      );
+      if(!arcade.active){
+        camera.position.copy(player);
+        camera.lookAt(
+          player.x+Math.sin(cam.yaw)*Math.cos(cam.pitch),
+          player.y+Math.sin(cam.pitch),
+          player.z+Math.cos(cam.yaw)*Math.cos(cam.pitch)
+        );
+      }
       if(RGB) RGB.material.color.setHSL((t*0.08)%1,0.8,0.6);
       tvGlow.intensity = power.tv ? 1.2+Math.sin(t*8)*0.08 : 0;
-      drawScreen(t); drawWindow(dt);
+      drawScreen(t); drawWindow(dt); arcade.tick(dt);
       if(videoTex) videoTex.needsUpdate=true;
       renderer.render(scene,camera);
       if(cssRenderer) cssRenderer.render(cssScene,camera);
