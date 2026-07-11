@@ -574,22 +574,21 @@
       obj.position.set(4.4,2.6,-4.33);   // on the monitor face
       cssScene.add(obj);
     }
-/* ============================================================
-   CHILLROOM MULTIPLAYER  —  PASTE THIS ENTIRE BLOCK into your
-   chill room, directly ABOVE the line:
+https://www.youtube.com/watch?v=wiG4fLEztEg 
+    /* ============================================================
+   CHILLROOM  —  v2
+   multiplayer + cozy interior + a guard that tells you when
+   the frame-loop edit didn't take.
 
-       // ---------- controls ----------
+   HOW TO USE:
+     1. delete the entire v1 block from chillroom.html
+     2. paste this in its place — directly ABOVE the line
+            // ---------- controls ----------
+     3. make the two frame-loop edits at the very bottom of this file
 
-   Then make TWO one-line edits in the frame loop. Both are
-   spelled out at the very bottom of this file.
-
-   Uses your existing helpers: place, prop, toonMat, scene,
-   camera, status, keys, player, cam, ray, ndc, hitList,
-   tryClick, playVideo, playAudio, showEmbed, clearEmbed,
-   activeEl, videoTex, mode, screenTex, TV.
+   The rain, the storm and the city skyline are not touched.
    ============================================================ */
 
-// >>>>>> point this at your deployed Worker <<<<<<
 const RELAY = "wss://chillroom-relay.dyshonjo.workers.dev/ws";
 
 const AV_COLORS = [
@@ -597,110 +596,255 @@ const AV_COLORS = [
   0x9b8bff, 0x6effa0, 0xff3df0, 0x5a8fd6, 0xffb14e
 ];
 
+// set to false if the film-style grade looks washed out on your monitor
+const CINEMATIC = true;
+
+// framerate-independent smoothing. rate is "how much per 60fps frame".
+function K(rate, dt) { return 1 - Math.pow(1 - rate, dt * 60); }
+
+function shortAngle(from, to) {
+  let d = (to - from) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+
 /* ============================================================
-   1. SEATING FURNITURE  — beanbags, floor pillows, lounge chair
+   PART 1 — COZY PASS
+   ============================================================ */
+const COZY = (function () {
+
+  if (CINEMATIC) {
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
+    // screens must not get tone-mapped or they go dull
+    [TV, MONITOR, ARCADE_SCREEN, winPane].forEach(function (m) {
+      if (m && m.material) m.material.toneMapped = false;
+    });
+  }
+
+  // warm charcoal instead of dead black — reads as a room, not a void
+  wallMat.color.set(0x17131c);
+  scene.background.set(0x120e16);
+  scene.fog.color.set(0x120e16);
+  scene.fog.near = 18; scene.fog.far = 44;
+
+  hemi.color.set(0x3a2f44);
+  hemi.groundColor.set(0x0d0810);
+  hemi.intensity = 0.34;
+  moon.color.set(0x8fa8ff);
+  moon.intensity = 0.28;
+
+  /* --- rug --- */
+  const rug2 = new THREE.Mesh(new THREE.BoxGeometry(9.6, 0.04, 7.4), toonMat(0x3d2438));
+  rug2.position.set(-1.2, 0.02, 1.2); rug2.receiveShadow = true; scene.add(rug2);
+  const rugTrim = new THREE.Mesh(new THREE.BoxGeometry(8.9, 0.05, 6.7), toonMat(0x5c3a54));
+  rugTrim.position.set(-1.2, 0.03, 1.2); scene.add(rugTrim);
+
+  /* --- coffee table + lava lamp + mug --- */
+  place(prop(new THREE.BoxGeometry(2.4, 0.12, 1.1), 0x5c4433, 0.03), -1.5, 0.94, 0.75);
+  [[-1.0, -0.42], [1.0, -0.42], [-1.0, 0.42], [1.0, 0.42]].forEach(function (o) {
+    place(prop(new THREE.BoxGeometry(0.1, 0.88, 0.1), 0x3f2e22, 0.06), -1.5 + o[0], 0.44, 0.75 + o[1]);
+  });
+  place(prop(new THREE.BoxGeometry(2.1, 0.06, 0.85), 0x4a3628, 0.04), -1.5, 0.36, 0.75);
+
+  place(prop(new THREE.CylinderGeometry(0.16, 0.2, 0.08, 12), 0x2a2d36, 0.06), -2.3, 1.04, 0.75);
+  const lava = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.09, 0.15, 0.55, 14),
+    new THREE.MeshBasicMaterial({ color: 0xff5a7a, transparent: true, opacity: 0.9, toneMapped: false })
+  );
+  lava.position.set(-2.3, 1.36, 0.75); scene.add(lava);
+  const lavaLight = new THREE.PointLight(0xff5a7a, 0.5, 5, 2);
+  lavaLight.position.set(-2.3, 1.4, 0.75); scene.add(lavaLight);
+
+  place(prop(new THREE.CylinderGeometry(0.08, 0.07, 0.14, 10), 0xd8dbe0, 0.06), -0.7, 1.07, 0.75);
+
+  /* --- LED bias strip behind the TV. biggest cozy-per-line in the file. --- */
+  const bias = new THREE.Mesh(
+    new THREE.PlaneGeometry(7.4, 4.5),
+    new THREE.MeshBasicMaterial({ color: 0x5a3fd6, transparent: true, opacity: 0.5, toneMapped: false })
+  );
+  bias.position.set(0, 3.7, -RD / 2 + 0.14); scene.add(bias);
+  const biasLight = new THREE.PointLight(0x7a5aff, 0.9, 12, 2);
+  biasLight.position.set(0, 3.7, -RD / 2 + 0.9); scene.add(biasLight);
+
+  /* --- string lights around the ceiling --- */
+  const bulbs = [];
+  function stringRun(x1, z1, x2, z2, n, sag) {
+    for (let i = 0; i <= n; i++) {
+      const k = i / n;
+      const b = new THREE.Mesh(
+        new THREE.SphereGeometry(0.075, 8, 8),
+        new THREE.MeshBasicMaterial({ color: 0xffcf8a, toneMapped: false })
+      );
+      b.position.set(
+        x1 + (x2 - x1) * k,
+        RH - 0.35 - Math.sin(k * Math.PI) * sag,
+        z1 + (z2 - z1) * k
+      );
+      b.userData.phase = Math.random() * 6.28;
+      scene.add(b); bulbs.push(b);
+    }
+  }
+  stringRun(-RW / 2 + 0.6, -RD / 2 + 0.6,  RW / 2 - 0.6, -RD / 2 + 0.6, 9, 0.5);
+  stringRun(-RW / 2 + 0.6, -RD / 2 + 0.6, -RW / 2 + 0.6,  RD / 2 - 0.6, 8, 0.5);
+  stringRun( RW / 2 - 0.6, -RD / 2 + 0.6,  RW / 2 - 0.6,  RD / 2 - 0.6, 8, 0.5);
+
+  const fairyA = new THREE.PointLight(0xffb870, 0.5, 11, 2);
+  fairyA.position.set(-5.5, RH - 0.9, 0); scene.add(fairyA);
+  const fairyB = new THREE.PointLight(0xffb870, 0.5, 11, 2);
+  fairyB.position.set(5.5, RH - 0.9, 0); scene.add(fairyB);
+
+  /* --- plants --- */
+  function plant(x, z, s) {
+    place(prop(new THREE.CylinderGeometry(0.28, 0.36, 0.55, 10), 0x8a5a3c, 0.05), x, 0.28, z);
+    place(prop(new THREE.CylinderGeometry(0.3, 0.3, 0.06, 10), 0x3a2a1e, 0.05), x, 0.56, z);
+    place(prop(new THREE.CylinderGeometry(0.05, 0.07, 1.5, 6), 0x3f6b3a, 0.05), x, 1.3, z);
+    for (let i = 0; i < 7; i++) {
+      const a = (i / 7) * Math.PI * 2 + Math.random();
+      const leaf = place(prop(new THREE.BoxGeometry(0.62, 0.06, 0.34), 0x4f8a46, 0.06),
+        x + Math.cos(a) * 0.34, 1.2 + Math.random() * 1.0, z + Math.sin(a) * 0.34);
+      leaf.rotation.y = -a;
+      leaf.rotation.z = 0.35 + Math.random() * 0.25;
+      leaf.scale.setScalar(s);
+    }
+  }
+  plant(-6.2, 4.6, 1.0);
+  plant(6.2, 4.6, 0.9);
+
+  /* --- floating shelf, books, a speaker --- */
+  place(prop(new THREE.BoxGeometry(3.0, 0.12, 0.42), 0x5c4433, 0.03), -1.5, 5.9, -RD / 2 + 0.4);
+  const bookCols = [0xff5a7a, 0xffe24e, 0x7cffd0, 0x9b8bff, 0xff8a5a, 0x5a8fd6, 0x6effa0];
+  for (let i = 0; i < 9; i++) {
+    const h = 0.34 + Math.random() * 0.16;
+    const b = place(prop(new THREE.BoxGeometry(0.11, h, 0.3), bookCols[i % bookCols.length], 0.07),
+      -2.6 + i * 0.14, 6.0 + h / 2, -RD / 2 + 0.4);
+    if (i === 7) b.rotation.z = 0.2;
+  }
+  place(prop(new THREE.BoxGeometry(0.5, 0.5, 0.35), 0x1d2028, 0.05), 0.0, 6.2, -RD / 2 + 0.4);
+
+  /* --- blanket over the couch arm --- */
+  const blanket = place(prop(new THREE.BoxGeometry(0.65, 0.9, 1.7), 0xd8a05a, 0.04), -3.35, 1.45, 2.6);
+  blanket.rotation.x = 0.06;
+
+  /* --- warm rim so the couch isn't a silhouette --- */
+  const rim = new THREE.PointLight(0xffb066, 0.42, 10, 2);
+  rim.position.set(-1.5, 4.6, 3.4); scene.add(rim);
+
+  function tick(t) {
+    const b = 0.85 + Math.sin(t * 0.9) * 0.15;
+    lava.scale.set(b, 1 / b, b);
+    lavaLight.intensity = 0.42 + Math.sin(t * 0.9) * 0.12;
+    lava.material.color.setHSL((0.93 + Math.sin(t * 0.15) * 0.06) % 1, 0.8, 0.62);
+
+    bias.material.color.setHSL((t * 0.02) % 1, 0.65, 0.42);
+    biasLight.color.setHSL((t * 0.02) % 1, 0.65, 0.6);
+    biasLight.intensity = power.tv ? 0.9 : 0.25;
+
+    for (const bl of bulbs) {
+      const f = 0.86 + Math.sin(t * 2.2 + bl.userData.phase) * 0.14;
+      bl.material.color.setRGB(f, 0.81 * f, 0.54 * f);
+    }
+  }
+
+  return { tick: tick };
+})();
+
+/* ============================================================
+   PART 2 — SEATING FURNITURE
    ============================================================ */
 (function buildSeating() {
-
-  // two beanbags, squashed spheres
-  const bagA = place(prop(new THREE.SphereGeometry(0.85, 14, 10), 0xb84a55, 0.04), -4.7, 0.48, 1.3);
+  const bagA = place(prop(new THREE.SphereGeometry(0.85, 14, 10), 0xb84a55, 0.04), -4.9, 0.48, 2.2);
   bagA.scale.set(1, 0.6, 1);
-  const bagB = place(prop(new THREE.SphereGeometry(0.85, 14, 10), 0x4a6bb8, 0.04),  1.7, 0.48, 1.7);
+  const bagB = place(prop(new THREE.SphereGeometry(0.85, 14, 10), 0x4a6bb8, 0.04), 1.9, 0.48, 2.4);
   bagB.scale.set(1, 0.6, 1);
-  const bagC = place(prop(new THREE.SphereGeometry(0.8, 14, 10), 0x5aa87a, 0.04),   3.0, 0.45, 3.5);
+  const bagC = place(prop(new THREE.SphereGeometry(0.8, 14, 10), 0x5aa87a, 0.04), 3.4, 0.45, 4.2);
   bagC.scale.set(1, 0.6, 1);
 
-  // floor pillows (rotated a touch so they don't look extruded)
-  const p1 = place(prop(new THREE.BoxGeometry(1.15, 0.3, 1.15), 0x8a5ab8, 0.05), -3.3, 0.16, -0.5);
+  const p1 = place(prop(new THREE.BoxGeometry(1.2, 0.34, 1.2), 0x8a5ab8, 0.05), -3.6, 0.18, -0.9);
   p1.rotation.y = 0.24;
-  const p2 = place(prop(new THREE.BoxGeometry(1.15, 0.3, 1.15), 0xb8a05a, 0.05),  0.3, 0.16, -0.7);
+  const p2 = place(prop(new THREE.BoxGeometry(1.2, 0.34, 1.2), 0xb8a05a, 0.05), 0.6, 0.18, -1.1);
   p2.rotation.y = -0.31;
 
-  // lounge chair, right of the couch
-  place(prop(new THREE.BoxGeometry(1.3, 0.75, 1.3), 0x2f5d57, 0.03), 4.0, 0.72, 1.2);   // seat block
-  place(prop(new THREE.BoxGeometry(1.3, 1.15, 0.35), 0x356b64, 0.03), 4.0, 1.4, 1.75);  // backrest
-  [[-0.55, 0.55], [0.55, 0.55], [-0.55, -0.55], [0.55, -0.55]].forEach(o => {
-    place(prop(new THREE.BoxGeometry(0.14, 0.35, 0.14), 0x24443f, 0.06), 4.0 + o[0], 0.18, 1.2 + o[1]);
+  place(prop(new THREE.BoxGeometry(1.3, 0.75, 1.3), 0x2f5d57, 0.03), 4.3, 0.72, 1.4);
+  place(prop(new THREE.BoxGeometry(1.3, 1.15, 0.35), 0x356b64, 0.03), 4.3, 1.4, 1.95);
+  [[-0.55, 0.55], [0.55, 0.55], [-0.55, -0.55], [0.55, -0.55]].forEach(function (o) {
+    place(prop(new THREE.BoxGeometry(0.14, 0.35, 0.14), 0x24443f, 0.06), 4.3 + o[0], 0.18, 1.4 + o[1]);
   });
 
-  // throw pillows on the couch (pure decoration, but you asked)
-  const tp1 = place(prop(new THREE.BoxGeometry(0.55, 0.5, 0.2), 0xffb14e, 0.05), -3.15, 1.45, 3.05);
+  const tp1 = place(prop(new THREE.BoxGeometry(0.55, 0.5, 0.2), 0xffb14e, 0.05), -3.05, 1.45, 3.05);
   tp1.rotation.z = 0.18;
-  const tp2 = place(prop(new THREE.BoxGeometry(0.55, 0.5, 0.2), 0xff5a7a, 0.05),  0.15, 1.45, 3.05);
+  const tp2 = place(prop(new THREE.BoxGeometry(0.55, 0.5, 0.2), 0xff5a7a, 0.05), 0.15, 1.45, 3.05);
   tp2.rotation.z = -0.14;
 })();
 
 /* ============================================================
-   2. SEAT ANCHORS
-      eye  = where the camera sits
-      av   = y of an avatar group parked here
-      yaw  = facing (Math.PI == looking at the TV)
+   PART 3 — SEAT ANCHORS
+     eye = camera height   av = avatar body y   hy = hitbox y
+     yaw = Math.PI  →  facing the TV
    ============================================================ */
 const SEATS = [
-  { label: "couch left",    x: -2.65, z: 2.45, yaw: Math.PI,        eye: 1.95, av: 0.50, hit: [1.0, 1.1, 1.1] },
-  { label: "couch middle",  x: -1.50, z: 2.45, yaw: Math.PI,        eye: 1.95, av: 0.50, hit: [1.0, 1.1, 1.1] },
-  { label: "couch right",   x: -0.35, z: 2.45, yaw: Math.PI,        eye: 1.95, av: 0.50, hit: [1.0, 1.1, 1.1] },
-  { label: "red beanbag",   x: -4.70, z: 1.30, yaw: Math.PI - 0.45, eye: 1.70, av: 0.28, hit: [1.6, 1.2, 1.6] },
-  { label: "blue beanbag",  x:  1.70, z: 1.70, yaw: Math.PI + 0.30, eye: 1.70, av: 0.28, hit: [1.6, 1.2, 1.6] },
-  { label: "green beanbag", x:  3.00, z: 3.50, yaw: Math.PI + 0.55, eye: 1.68, av: 0.26, hit: [1.5, 1.2, 1.5] },
-  { label: "floor pillow",  x: -3.30, z: -0.50, yaw: Math.PI,       eye: 1.30, av: -0.30, hit: [1.2, 1.0, 1.2] },
-  { label: "floor pillow",  x:  0.30, z: -0.70, yaw: Math.PI,       eye: 1.30, av: -0.30, hit: [1.2, 1.0, 1.2] },
-  { label: "lounge chair",  x:  4.00, z: 1.10, yaw: Math.PI - 0.35, eye: 1.92, av: 0.45, hit: [1.4, 1.3, 1.4] }
+  { label: "couch left",    x: -2.65, z:  2.45, yaw: Math.PI,        eye: 1.95, av:  0.50, hy: 1.15, hit: [1.05, 1.5, 1.4] },
+  { label: "couch middle",  x: -1.50, z:  2.45, yaw: Math.PI,        eye: 1.95, av:  0.50, hy: 1.15, hit: [1.05, 1.5, 1.4] },
+  { label: "couch right",   x: -0.35, z:  2.45, yaw: Math.PI,        eye: 1.95, av:  0.50, hy: 1.15, hit: [1.05, 1.5, 1.4] },
+  { label: "red beanbag",   x: -4.90, z:  2.20, yaw: Math.PI - 0.40, eye: 1.70, av:  0.28, hy: 0.70, hit: [1.7, 1.5, 1.7] },
+  { label: "blue beanbag",  x:  1.90, z:  2.40, yaw: Math.PI + 0.28, eye: 1.70, av:  0.28, hy: 0.70, hit: [1.7, 1.5, 1.7] },
+  { label: "green beanbag", x:  3.40, z:  4.20, yaw: Math.PI + 0.50, eye: 1.68, av:  0.26, hy: 0.68, hit: [1.6, 1.5, 1.6] },
+  { label: "floor pillow",  x: -3.60, z: -0.90, yaw: Math.PI,        eye: 1.30, av: -0.28, hy: 0.42, hit: [1.3, 1.0, 1.3] },
+  { label: "floor pillow",  x:  0.60, z: -1.10, yaw: Math.PI,        eye: 1.30, av: -0.28, hy: 0.42, hit: [1.3, 1.0, 1.3] },
+  { label: "lounge chair",  x:  4.30, z:  1.40, yaw: Math.PI - 0.32, eye: 1.92, av:  0.45, hy: 1.10, hit: [1.45, 1.5, 1.45] }
 ];
 
-// invisible click targets, one per seat
-const SEAT_HITS = SEATS.map((s, i) => {
+const SEAT_HITS = SEATS.map(function (s, i) {
   const m = new THREE.Mesh(
     new THREE.BoxGeometry(s.hit[0], s.hit[1], s.hit[2]),
     new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false })
   );
-  m.position.set(s.x, s.eye - 0.7, s.z);
+  m.position.set(s.x, s.hy, s.z);
   m.userData.act = "seat";
   m.userData.seat = i;
   scene.add(m);
   return m;
 });
 
-// soft glow ring on the seat you're closest to while standing
 const seatRing = new THREE.Mesh(
-  new THREE.RingGeometry(0.5, 0.62, 24),
-  new THREE.MeshBasicMaterial({ color: 0x7cd1ff, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false })
+  new THREE.RingGeometry(0.5, 0.64, 26),
+  new THREE.MeshBasicMaterial({
+    color: 0x7cd1ff, transparent: true, opacity: 0,
+    side: THREE.DoubleSide, depthWrite: false, toneMapped: false
+  })
 );
 seatRing.rotation.x = -Math.PI / 2;
-seatRing.position.y = 0.06;
+seatRing.position.y = 0.07;
 scene.add(seatRing);
 
 /* ============================================================
-   3. AVATARS
+   PART 4 — AVATARS
    ============================================================ */
 function nameTag(name, colorHex) {
   const c = document.createElement("canvas"); c.width = 256; c.height = 64;
   const g = c.getContext("2d");
-  g.fillStyle = "rgba(10,12,20,0.78)";
-  g.fillRect(0, 14, 256, 36);
-  g.fillStyle = "#" + colorHex.toString(16).padStart(6, "0");
-  g.fillRect(0, 14, 5, 36);
-  g.fillStyle = "#eaf0ff";
-  g.font = "600 22px ui-monospace, monospace";
+  g.fillStyle = "rgba(10,12,20,0.8)"; g.fillRect(0, 14, 256, 36);
+  g.fillStyle = "#" + colorHex.toString(16).padStart(6, "0"); g.fillRect(0, 14, 5, 36);
+  g.fillStyle = "#eaf0ff"; g.font = "600 22px ui-monospace, monospace";
   g.textAlign = "center"; g.textBaseline = "middle";
   g.fillText(name, 130, 33);
   const t = new THREE.CanvasTexture(c); t.encoding = THREE.sRGBEncoding;
-  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthTest: false }));
-  s.scale.set(1.15, 0.29, 1);
-  s.position.y = 2.25;
-  s.renderOrder = 999;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: t, transparent: true, depthTest: false, toneMapped: false
+  }));
+  s.scale.set(1.15, 0.29, 1); s.position.y = 2.25; s.renderOrder = 999;
   return s;
 }
 
 function chatBubble(msg) {
   const c = document.createElement("canvas"); c.width = 384; c.height = 96;
   const g = c.getContext("2d");
-  g.fillStyle = "rgba(16,20,32,0.9)"; g.fillRect(0, 0, 384, 76);
-  g.strokeStyle = "rgba(124,209,255,0.55)"; g.lineWidth = 2; g.strokeRect(1, 1, 382, 74);
-  g.beginPath(); g.moveTo(178, 76); g.lineTo(192, 94); g.lineTo(206, 76);
-  g.fillStyle = "rgba(16,20,32,0.9)"; g.fill();
-  g.fillStyle = "#dfe6f2"; g.font = "18px ui-monospace, monospace";
-  g.textAlign = "center";
+  g.fillStyle = "rgba(16,20,32,0.92)"; g.fillRect(0, 0, 384, 76);
+  g.strokeStyle = "rgba(255,180,120,0.6)"; g.lineWidth = 2; g.strokeRect(1, 1, 382, 74);
+  g.beginPath(); g.moveTo(178, 75); g.lineTo(192, 94); g.lineTo(206, 75);
+  g.fillStyle = "rgba(16,20,32,0.92)"; g.fill();
+  g.fillStyle = "#dfe6f2"; g.font = "18px ui-monospace, monospace"; g.textAlign = "center";
   const words = msg.split(" ");
   let line = "", y = 30;
   for (const w of words) {
@@ -710,10 +854,10 @@ function chatBubble(msg) {
   }
   g.fillText(line, 192, y);
   const tex = new THREE.CanvasTexture(c); tex.encoding = THREE.sRGBEncoding;
-  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
-  s.scale.set(1.9, 0.48, 1);
-  s.position.y = 2.85;
-  s.renderOrder = 1000;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: tex, transparent: true, depthTest: false, toneMapped: false
+  }));
+  s.scale.set(1.9, 0.48, 1); s.position.y = 2.9; s.renderOrder = 1000;
   s.userData.life = 6;
   return s;
 }
@@ -721,51 +865,83 @@ function chatBubble(msg) {
 function buildAvatar(name, colorHex) {
   const g = new THREE.Group();
 
+  // hips: everything above the legs hangs off this, so we can bob/lean as one piece
+  const hips = new THREE.Group();
+  hips.position.y = 0;
+  g.add(hips);
+
   const torso = prop(new THREE.BoxGeometry(0.5, 0.75, 0.32), colorHex, 0.05);
-  torso.position.y = 1.05; g.add(torso);
+  torso.position.y = 1.05; hips.add(torso);
 
   const head = prop(new THREE.BoxGeometry(0.38, 0.38, 0.36), 0xd9a877, 0.06);
-  head.position.y = 1.66; g.add(head);
+  head.position.y = 1.66; hips.add(head);
 
-  // brim so you can read which way they're facing at a glance
   const brim = prop(new THREE.BoxGeometry(0.4, 0.06, 0.16), colorHex, 0.07);
-  brim.position.set(0, 1.76, 0.24); g.add(brim);
+  brim.position.set(0, 0.1, 0.24); head.add(brim);   // parented to head so it turns with it
+
+  const armL = prop(new THREE.BoxGeometry(0.14, 0.6, 0.16), colorHex, 0.06);
+  const armR = prop(new THREE.BoxGeometry(0.14, 0.6, 0.16), colorHex, 0.06);
+  armL.position.set(-0.33, 1.08, 0); armR.position.set(0.33, 1.08, 0);
+  hips.add(armL); hips.add(armR);
 
   const legL = prop(new THREE.BoxGeometry(0.18, 0.7, 0.2), 0x1d2130, 0.06);
   const legR = prop(new THREE.BoxGeometry(0.18, 0.7, 0.2), 0x1d2130, 0.06);
   legL.position.set(-0.13, 0.35, 0); legR.position.set(0.13, 0.35, 0);
   g.add(legL); g.add(legR);
 
-  const armL = prop(new THREE.BoxGeometry(0.14, 0.6, 0.16), colorHex, 0.06);
-  const armR = prop(new THREE.BoxGeometry(0.14, 0.6, 0.16), colorHex, 0.06);
-  armL.position.set(-0.33, 1.08, 0); armR.position.set(0.33, 1.08, 0);
-  g.add(armL); g.add(armR);
+  g.add(nameTag(name, colorHex));
 
-  const tag = nameTag(name, colorHex);
-  g.add(tag);
-
-  g.userData.parts  = { torso, head, legL, legR, armL, armR, tag };
+  g.userData.parts  = { hips, torso, head, legL, legR, armL, armR };
   g.userData.bubble = null;
   g.userData.walk   = 0;
+  g.userData.phase  = Math.random() * 6.28;
   scene.add(g);
   return g;
 }
 
-function poseAvatar(av, seated, dt, speed) {
-  const p = av.userData.parts;
+/* speed is in world-units/sec. lookYaw is where their camera is pointed. */
+function poseAvatar(av, seated, dt, speed, bodyYaw, lookYaw, t) {
+  const p  = av.userData.parts;
+  const ph = av.userData.phase;
+
+  // always breathing, even standing still — nothing in the room should be a statue
+  const breath = Math.sin(t * 1.5 + ph) * 0.012;
+
+  // head turns toward where they're actually looking, up to ~40 degrees
+  const headTurn = THREE.MathUtils.clamp(shortAngle(bodyYaw, lookYaw + Math.PI), -0.7, 0.7);
+  p.head.rotation.y += (headTurn - p.head.rotation.y) * K(0.2, dt);
+
   if (seated) {
     p.legL.rotation.x = Math.PI / 2; p.legR.rotation.x = Math.PI / 2;
-    p.legL.position.set(-0.13, 0.62, 0.28); p.legR.position.set(0.13, 0.62, 0.28);
-    p.armL.rotation.x = 0.35; p.armR.rotation.x = 0.35;
+    p.legL.position.set(-0.13, 0.62, 0.28);
+    p.legR.position.set( 0.13, 0.62, 0.28);
+    p.armL.rotation.x = 0.4;  p.armR.rotation.x = 0.4;
+    p.armL.rotation.z = 0.12; p.armR.rotation.z = -0.12;
+    p.hips.rotation.x = 0;
+    p.hips.position.y = breath * 0.6;
+    p.torso.position.y = 1.05;
     av.userData.walk = 0;
-  } else {
-    // walk cycle driven by how fast they're actually moving
-    av.userData.walk += speed * dt * 5;
-    const sw = speed > 0.15 ? Math.sin(av.userData.walk) * 0.5 : 0;
-    p.legL.rotation.x = sw;  p.legR.rotation.x = -sw;
-    p.armL.rotation.x = -sw; p.armR.rotation.x = sw;
-    p.legL.position.set(-0.13, 0.35, 0); p.legR.position.set(0.13, 0.35, 0);
+    return;
   }
+
+  const walking = speed > 0.25;
+  av.userData.walk += (walking ? speed : 0) * dt * 4.2;
+
+  const sw = walking ? Math.sin(av.userData.walk) * Math.min(0.62, 0.28 + speed * 0.09) : 0;
+  const bob = walking ? Math.abs(Math.sin(av.userData.walk)) * 0.045 : 0;
+
+  // legs + counter-swinging arms
+  p.legL.rotation.x = sw;  p.legR.rotation.x = -sw;
+  p.legL.position.set(-0.13, 0.35, 0);
+  p.legR.position.set( 0.13, 0.35, 0);
+  p.armL.rotation.x = -sw * 0.85; p.armR.rotation.x = sw * 0.85;
+  p.armL.rotation.z = 0.06; p.armR.rotation.z = -0.06;
+
+  // lean into the walk + bob on each footfall
+  const lean = THREE.MathUtils.clamp(speed * 0.035, 0, 0.16);
+  p.hips.rotation.x += (lean - p.hips.rotation.x) * K(0.15, dt);
+  p.hips.position.y  = bob + breath;
+  p.torso.position.y = 1.05;
 }
 
 function sayOver(av, msg) {
@@ -776,47 +952,41 @@ function sayOver(av, msg) {
 }
 
 /* ============================================================
-   4. HUD  (roster + chat log + name box)
+   PART 5 — HUD
    ============================================================ */
 const hud = document.createElement("div");
-hud.innerHTML = `
-<style>
-  #net { position:fixed; right:14px; top:14px; z-index:12; width:216px;
-         font-family:ui-monospace,monospace; font-size:11px; color:#eae6f0; pointer-events:none; }
-  #net .panel { background:rgba(14,17,28,.72); border:1px solid rgba(124,209,255,.24);
-                border-radius:10px; padding:9px 11px; backdrop-filter:blur(8px); margin-bottom:8px; }
-  #net .hdr { font-size:10px; letter-spacing:.18em; text-transform:uppercase; opacity:.5; margin-bottom:6px; }
-  #net .row { display:flex; align-items:center; gap:7px; padding:2px 0; }
-  #net .dot { width:8px; height:8px; border-radius:50%; flex:0 0 auto; }
-  #net .who { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  #net .badge { font-size:9px; opacity:.6; }
-  #chatlog { max-height:150px; overflow:hidden; display:flex; flex-direction:column; justify-content:flex-end; }
-  #chatlog div { padding:1px 0; line-height:1.35; opacity:.9; }
-  #namein { pointer-events:auto; width:100%; background:rgba(20,22,34,.8);
-            border:1px solid rgba(124,209,255,.3); color:#eae6f0; border-radius:7px;
-            padding:5px 7px; font:11px ui-monospace,monospace; outline:none; }
-  #chatin { position:fixed; left:50%; bottom:96px; transform:translateX(-50%); z-index:12;
-            width:420px; max-width:88vw; display:none; background:rgba(14,17,28,.9);
-            border:1px solid rgba(124,209,255,.5); color:#eae6f0; border-radius:9px;
-            padding:9px 12px; font:12px ui-monospace,monospace; outline:none; backdrop-filter:blur(8px); }
-  #netstate { position:fixed; right:14px; bottom:14px; z-index:12; font:10px ui-monospace,monospace;
-              letter-spacing:.1em; text-transform:uppercase; opacity:.55; color:#7cd1ff; }
-</style>
-<div id="net">
-  <div class="panel">
-    <div class="hdr">In the cave</div>
-    <div id="roster"></div>
-  </div>
-  <div class="panel">
-    <div class="hdr">Chat &middot; press T</div>
-    <div id="chatlog"></div>
-  </div>
-  <div class="panel">
-    <input id="namein" maxlength="16" placeholder="your name" />
-  </div>
-</div>
-<input id="chatin" maxlength="160" placeholder="say something &mdash; enter to send, esc to cancel" />
-<div id="netstate">connecting&hellip;</div>`;
+hud.innerHTML =
+'<style>' +
+'#net{position:fixed;right:14px;top:14px;z-index:12;width:216px;font-family:ui-monospace,monospace;font-size:11px;color:#eae6f0}' +
+'#net .panel{background:rgba(18,15,24,.78);border:1px solid rgba(255,180,120,.22);border-radius:10px;padding:9px 11px;backdrop-filter:blur(8px);margin-bottom:8px}' +
+'#net .hdr{font-size:10px;letter-spacing:.18em;text-transform:uppercase;opacity:.5;margin-bottom:6px}' +
+'#net .row{display:flex;align-items:center;gap:7px;padding:2px 0}' +
+'#net .dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}' +
+'#net .who{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+'#net .badge{font-size:9px;opacity:.55}' +
+'#chatpanel{cursor:pointer}#chatpanel:hover{border-color:rgba(255,180,120,.6)}' +
+'#chatlog{min-height:20px;max-height:150px;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end}' +
+'#chatlog div{padding:1px 0;line-height:1.35;opacity:.9}' +
+'#namein{width:100%;background:rgba(28,22,34,.85);border:1px solid rgba(255,180,120,.32);color:#eae6f0;border-radius:7px;padding:5px 7px;font:11px ui-monospace,monospace;outline:none}' +
+'#chatin{position:fixed;left:50%;bottom:100px;transform:translateX(-50%);z-index:14;width:420px;max-width:88vw;display:none;background:rgba(18,15,24,.95);border:1px solid rgba(255,180,120,.65);color:#eae6f0;border-radius:9px;padding:10px 12px;font:12px ui-monospace,monospace;outline:none;backdrop-filter:blur(8px)}' +
+'#netstate{position:fixed;right:14px;bottom:14px;z-index:12;font:10px ui-monospace,monospace;letter-spacing:.1em;text-transform:uppercase;opacity:.55;color:#ffb870}' +
+'#loopwarn{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:99;display:none;max-width:560px;background:#2a0f14;border:2px solid #ff5a7a;color:#ffd9e0;border-radius:12px;padding:20px 24px;font:13px/1.6 ui-monospace,monospace}' +
+'#loopwarn code{background:#12060a;padding:2px 6px;border-radius:4px;color:#ffe24e;display:inline-block;margin:3px 0}' +
+'</style>' +
+'<div id="net">' +
+  '<div class="panel"><div class="hdr">In the cave</div><div id="roster"></div></div>' +
+  '<div class="panel" id="chatpanel"><div class="hdr">Chat &middot; press T</div><div id="chatlog"></div></div>' +
+  '<div class="panel"><input id="namein" maxlength="16" placeholder="your name" /></div>' +
+'</div>' +
+'<input id="chatin" maxlength="160" placeholder="say something — enter to send, esc to cancel" />' +
+'<div id="netstate">connecting…</div>' +
+'<div id="loopwarn"><b>The frame-loop edit is missing.</b><br><br>' +
+  'Nothing will move until you fix this. Find <code>function frame()</code> near the bottom of chillroom.html and change:<br><br>' +
+  '<code>drawScreen(t); drawWindow(dt); arcade.tick(dt);</code><br>to<br>' +
+  '<code>drawScreen(t); drawWindow(dt); arcade.tick(dt); NET.update(dt);</code><br><br>' +
+  'And a few lines above that:<br><br>' +
+  '<code>const lock=arcade.active;</code><br>to<br>' +
+  '<code>const lock=arcade.active || NET.seated || NET.chatting;</code></div>';
 document.body.appendChild(hud);
 
 const rosterEl  = document.getElementById("roster");
@@ -824,39 +994,51 @@ const chatlogEl = document.getElementById("chatlog");
 const nameEl    = document.getElementById("namein");
 const chatEl    = document.getElementById("chatin");
 const stateEl   = document.getElementById("netstate");
+const chatPanel = document.getElementById("chatpanel");
+const loopWarn  = document.getElementById("loopwarn");
 
 function logChat(name, colorHex, msg) {
   const d = document.createElement("div");
-  d.innerHTML = `<span style="color:#${colorHex.toString(16).padStart(6, "0")}">${name}</span>
-                 <span style="opacity:.85">${msg.replace(/[<>&]/g, "")}</span>`;
+  const hex = "#" + (((colorHex | 0) || 0x7cd1ff)).toString(16).padStart(6, "0");
+  d.innerHTML = '<span style="color:' + hex + '">' + name + '</span> ' +
+                '<span style="opacity:.85">' + msg.replace(/[<>&]/g, "") + '</span>';
   chatlogEl.appendChild(d);
   while (chatlogEl.children.length > 9) chatlogEl.removeChild(chatlogEl.firstChild);
 }
 
 /* ============================================================
-   5. THE NETWORK LAYER
+   PART 6 — NETWORK
    ============================================================ */
 const NET = (function () {
   let ws = null, myId = null, driver = null, skew = 0;
   let connected = false, retry = 800;
-  const peers = new Map();          // id -> { av, tx, tz, tyaw, seat, name, color }
+  const peers = new Map();
 
-  let mySeat = null, myName = "", myColor = AV_COLORS[(Math.random() * AV_COLORS.length) | 0];
+  let mySeat = null;
+  let myName = "", myColor = AV_COLORS[(Math.random() * AV_COLORS.length) | 0];
+  const STAND_EYE = 2.3;
   const seatCam = new THREE.Vector3();
-  let seatBlend = 0;
+  const seatTarget = new THREE.Vector3();
 
-  let poseAcc = 0, tickAcc = 0, lastSent = { x: 1e9, z: 1e9, yaw: 1e9 };
-  let applying = false;             // true while we're replaying a remote command
+  let poseAcc = 0, tickAcc = 0, beatAcc = 0;
+  let lastSent = { x: 1e9, z: 1e9, yaw: 1e9 };
+  let applying = false;
+  let chatOpen = false;
+  let updateCalls = 0;               // <-- the guard
 
-  // ---- name persistence (this is your own site, localStorage is fine here) ----
   try {
-    myName  = localStorage.getItem("cr_name")  || "guest" + ((Math.random() * 90 + 10) | 0);
-    myColor = +localStorage.getItem("cr_color") || myColor;
+    myName = localStorage.getItem("cr_name") || ("guest" + ((Math.random() * 90 + 10) | 0));
+    const c = +localStorage.getItem("cr_color");
+    if (c) myColor = c;
   } catch (e) { myName = "guest" + ((Math.random() * 90 + 10) | 0); }
+
   nameEl.value = myName;
-  nameEl.addEventListener("change", () => {
+  nameEl.addEventListener("change", function () {
     myName = (nameEl.value || "guest").slice(0, 16);
-    try { localStorage.setItem("cr_name", myName); } catch (e) {}
+    try {
+      localStorage.setItem("cr_name", myName);
+      localStorage.setItem("cr_color", String(myColor));
+    } catch (e) {}
     send({ t: "join", name: myName, color: myColor });
     drawRoster();
   });
@@ -865,27 +1047,28 @@ const NET = (function () {
 
   function drawRoster() {
     const rows = [[myId || "me", myName, myColor, mySeat, true]];
-    for (const [id, p] of peers) rows.push([id, p.name, p.color, p.seat, false]);
-    rosterEl.innerHTML = rows.map(([id, n, c, seat, isMe]) => {
-      const hex = "#" + (c | 0).toString(16).padStart(6, "0");
-      const where = seat !== null && seat !== undefined ? SEATS[seat].label : "standing";
-      const drv = (driver && driver === id) ? ` <span class="badge">&#9654; driving</span>` : "";
-      return `<div class="row"><div class="dot" style="background:${hex}"></div>
-              <div class="who">${n}${isMe ? " (you)" : ""}</div>
-              <div class="badge">${where}</div>${drv}</div>`;
+    for (const kv of peers) rows.push([kv[0], kv[1].name, kv[1].color, kv[1].seat, false]);
+    rosterEl.innerHTML = rows.map(function (r) {
+      const id = r[0], n = r[1], c = r[2], seat = r[3], isMe = r[4];
+      const hex = "#" + (((c | 0) || 0x7cd1ff)).toString(16).padStart(6, "0");
+      const where = (seat !== null && seat !== undefined) ? SEATS[seat].label : "standing";
+      const drv = (driver && driver === id) ? ' <span class="badge">&#9654;</span>' : "";
+      return '<div class="row"><div class="dot" style="background:' + hex + '"></div>' +
+             '<div class="who">' + n + (isMe ? " (you)" : "") + '</div>' +
+             '<div class="badge">' + where + '</div>' + drv + '</div>';
     }).join("");
   }
 
-  /* ---------------- media plumbing ---------------- */
+  /* ---- media ---- */
   const _playVideo = playVideo, _playAudio = playAudio, _showEmbed = showEmbed;
 
   function share(action, url) {
     if (applying) return;
-    if (typeof url === "string" && url.startsWith("blob:")) {
+    if (typeof url === "string" && url.indexOf("blob:") === 0) {
       status("local file — only you can see that. paste a link to share it with the room");
       return;
     }
-    send({ t: "media", action, url });
+    send({ t: "media", action: action, url: url });
   }
 
   playVideo = function (u) { _playVideo(u); share("video", u); };
@@ -902,69 +1085,83 @@ const NET = (function () {
   function applyMedia(m) {
     applying = true;
     try {
-      if (m.action === "video")      playVideo(m.url);
+      if (m.action === "video") playVideo(m.url);
       else if (m.action === "audio") playAudio(m.url);
       else if (m.action === "embed") showEmbed(m.url);
-      else if (m.action === "stop")  localStop();
-    } catch (e) {} finally { applying = false; }
+      else if (m.action === "stop") localStop();
+    } catch (e) { console.error("[chillroom] media", e); }
+    applying = false;
     if (m.by && m.driver !== myId) status(m.by + " put something on");
   }
 
   function applyTick(tk) {
-    if (!activeEl) return;                       // iframes can't be synced — nothing to do
-    const now    = Date.now() + skew;
+    if (!activeEl) return;
+    const now = Date.now() + skew;
     const expect = tk.state === "play" ? tk.time + (now - tk.sv) / 1000 : tk.time;
     if (Math.abs(activeEl.currentTime - expect) > 0.6) {
       try { activeEl.currentTime = expect; } catch (e) {}
     }
-    if (tk.state === "play"  && activeEl.paused)  activeEl.play().catch(() => {});
+    if (tk.state === "play" && activeEl.paused) activeEl.play().catch(function () {});
     if (tk.state === "pause" && !activeEl.paused) activeEl.pause();
   }
-
-  // the dock buttons already do their local thing; these just tell the room
-  document.getElementById("bplay").addEventListener("click",  () => pushTick(true));
-  document.getElementById("bpause").addEventListener("click", () => pushTick(false));
-  document.getElementById("bstop").addEventListener("click",  () => { if (!applying) send({ t: "media", action: "stop" }); });
 
   function pushTick(playing) {
     if (!activeEl || driver !== myId) return;
     send({ t: "tick", state: playing ? "play" : "pause", time: activeEl.currentTime });
   }
 
-  /* ---------------- seats ---------------- */
+  document.getElementById("bplay").addEventListener("click",  function () { pushTick(true); });
+  document.getElementById("bpause").addEventListener("click", function () { pushTick(false); });
+  document.getElementById("bstop").addEventListener("click",  function () {
+    if (!applying) send({ t: "media", action: "stop" });
+  });
+
+  /* ---- seats ---- */
+  function seatTaken(i) {
+    for (const p of peers.values()) if (p.seat === i) return true;
+    return false;
+  }
+
   function toggleSeat(i) {
-    if (mySeat === i) { send({ t: "seat", seat: null }); mySeat = null; status("standing"); }
-    else {
-      // don't even ask if we can see it's taken
-      for (const p of peers.values()) if (p.seat === i) { status(SEATS[i].label + " is taken"); return; }
+    if (mySeat === i) {
+      send({ t: "seat", seat: null });
+      const s = SEATS[i];
+      mySeat = null;
+      // step out in front of the seat, back at standing height
+      player.set(
+        THREE.MathUtils.clamp(s.x - Math.sin(s.yaw) * 1.5, -RW / 2 + 1, RW / 2 - 1),
+        STAND_EYE,
+        THREE.MathUtils.clamp(s.z - Math.cos(s.yaw) * 1.5, -RD / 2 + 1, RD / 2 - 1)
+      );
+      status("standing");
+    } else {
+      if (seatTaken(i)) { status(SEATS[i].label + " is taken"); return; }
       send({ t: "seat", seat: i });
       mySeat = i;
-      seatBlend = 0;
       seatCam.copy(camera.position);
       cam.yaw = SEATS[i].yaw;
-      status("sat down — " + SEATS[i].label + " · E or click to get up");
+      cam.pitch = 0;
+      status("sat down · " + SEATS[i].label + " — E or click to get up");
     }
     drawRoster();
   }
 
   function nearestSeat() {
-    let best = -1, bd = 2.4;
+    let best = -1, bd = 1.9;
     for (let i = 0; i < SEATS.length; i++) {
-      let taken = false;
-      for (const p of peers.values()) if (p.seat === i) taken = true;
-      if (taken) continue;
+      if (seatTaken(i)) continue;
       const d = Math.hypot(player.x - SEATS[i].x, player.z - SEATS[i].z);
       if (d < bd) { bd = d; best = i; }
     }
     return best;
   }
 
-  /* ---------------- chat ---------------- */
-  let chatOpen = false;
+  /* ---- chat ---- */
   function openChat()  { chatOpen = true;  chatEl.style.display = "block"; chatEl.value = ""; chatEl.focus(); }
   function closeChat() { chatOpen = false; chatEl.style.display = "none";  chatEl.blur(); }
+  chatPanel.addEventListener("click", openChat);
 
-  window.addEventListener("keydown", e => {
+  window.addEventListener("keydown", function (e) {
     if (chatOpen) {
       e.stopImmediatePropagation();
       if (e.key === "Enter") {
@@ -978,14 +1175,21 @@ const NET = (function () {
     if (arcade.active) return;
 
     const k = e.key.toLowerCase();
-    if (k === "t") { e.preventDefault(); e.stopImmediatePropagation(); openChat(); }
-    else if (k === "e") {
+    if (k === "t") {
+      e.preventDefault(); e.stopImmediatePropagation();
+      openChat();
+    } else if (k === "e") {
+      e.preventDefault(); e.stopImmediatePropagation();
       if (mySeat !== null) toggleSeat(mySeat);
-      else { const s = nearestSeat(); if (s >= 0) toggleSeat(s); else status("nothing to sit on here"); }
+      else {
+        const s = nearestSeat();
+        if (s >= 0) toggleSeat(s);
+        else status("walk up to a seat first");
+      }
     }
   }, true);
 
-  /* ---------------- click / hover: seats first, then everything else ---------------- */
+  /* ---- clicks: seats first, then everything you already had ---- */
   const _hitList  = hitList;
   const _tryClick = tryClick;
 
@@ -1000,19 +1204,20 @@ const NET = (function () {
     _tryClick(cx, cy);
   };
 
-  /* ---------------- socket ---------------- */
+  /* ---- socket ---- */
   function connect() {
     stateEl.textContent = "connecting…";
-    try { ws = new WebSocket(RELAY); } catch (e) { schedule(); return; }
+    try { ws = new WebSocket(RELAY); }
+    catch (e) { console.error("[chillroom] socket", e); schedule(); return; }
 
-    ws.onopen = () => {
+    ws.onopen = function () {
       connected = true; retry = 800;
       stateEl.textContent = "connected";
       send({ t: "join", name: myName, color: myColor });
       send({ t: "ping", c: Date.now() });
     };
 
-    ws.onclose = () => {
+    ws.onclose = function () {
       connected = false;
       stateEl.textContent = "reconnecting…";
       for (const p of peers.values()) scene.remove(p.av);
@@ -1020,68 +1225,69 @@ const NET = (function () {
       schedule();
     };
 
-    ws.onerror = () => { try { ws.close(); } catch (e) {} };
+    ws.onerror = function () { try { ws.close(); } catch (e) {} };
 
-    ws.onmessage = ev => {
+    ws.onmessage = function (ev) {
       let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      let p;
 
       switch (m.t) {
-
-        case "welcome": {
-          myId = m.id;
-          driver = m.driver;
+        case "welcome":
+          myId = m.id; driver = m.driver;
           skew = m.sv - Date.now();
-          for (const p of m.peers) addPeer(p);
+          for (const q of m.peers) addPeer(q);
           if (m.media) applyMedia(m.media);
-          if (m.tick) setTimeout(() => applyTick(m.tick), 400);   // let the element load first
-          if (mySeat !== null) send({ t: "seat", seat: mySeat });
+          if (m.tick) setTimeout(function () { applyTick(m.tick); }, 500);
           drawRoster();
           break;
-        }
 
-        case "peer":   addPeer(m); drawRoster(); break;
+        case "peer":
+          addPeer(m); drawRoster();
+          break;
 
-        case "left": {
-          const p = peers.get(m.id);
+        case "left":
+          p = peers.get(m.id);
           if (p) { scene.remove(p.av); peers.delete(m.id); }
           drawRoster();
           break;
-        }
 
-        case "pose": {
-          const p = peers.get(m.id);
+        case "pose":
+          p = peers.get(m.id);
           if (p) { p.tx = m.x; p.tz = m.z; p.tyaw = m.yaw; }
           break;
-        }
 
-        case "seat": {
+        case "seat":
           if (m.id === myId) {
             if (m.denied) { mySeat = null; status("someone got there first"); }
             else mySeat = m.seat;
           } else {
-            const p = peers.get(m.id);
+            p = peers.get(m.id);
             if (p) p.seat = m.seat;
           }
           drawRoster();
           break;
-        }
 
-        case "media":  driver = m.driver; applyMedia(m); drawRoster(); break;
-        case "tick":   applyTick(m); break;
-        case "driver": driver = m.id; drawRoster(); break;
+        case "media":
+          driver = m.driver; applyMedia(m); drawRoster();
+          break;
 
-        case "chat": {
+        case "tick":
+          applyTick(m);
+          break;
+
+        case "driver":
+          driver = m.id; drawRoster();
+          break;
+
+        case "chat":
           logChat(m.name, m.color, m.msg);
-          const p = peers.get(m.id);
+          p = peers.get(m.id);
           if (p) sayOver(p.av, m.msg);
           break;
-        }
 
-        case "pong": {
-          const rtt = Date.now() - m.c;
-          skew = m.sv + rtt / 2 - Date.now();
+        case "pong":
+          skew = m.sv + (Date.now() - m.c) / 2 - Date.now();
           break;
-        }
       }
     };
   }
@@ -1091,127 +1297,157 @@ const NET = (function () {
     retry = Math.min(retry * 1.7, 10000);
   }
 
-  function addPeer(p) {
-    if (peers.has(p.id)) return;
-    const av = buildAvatar(p.name, p.color | 0);
-    av.position.set(p.x, 0, p.z);
-    av.rotation.y = p.yaw;
-    peers.set(p.id, {
-      av, name: p.name, color: p.color | 0, seat: p.seat,
-      tx: p.x, tz: p.z, tyaw: p.yaw,
-      lx: p.x, lz: p.z
+  function addPeer(q) {
+    if (peers.has(q.id)) return;
+    const av = buildAvatar(q.name || "guest", (q.color | 0) || 0x7cd1ff);
+    av.position.set(q.x, 0, q.z);
+    av.rotation.y = q.yaw + Math.PI;
+    peers.set(q.id, {
+      av: av,
+      name: q.name || "guest",
+      color: (q.color | 0) || 0x7cd1ff,
+      seat: (q.seat === undefined ? null : q.seat),
+      tx: q.x, tz: q.z, tyaw: q.yaw,
+      bodyYaw: q.yaw + Math.PI,
+      speed: 0
     });
   }
 
   connect();
 
-  /* ---------------- per-frame ---------------- */
+  /* ---- per frame ---- */
   function update(dt) {
+    updateCalls++;
     const now = Date.now();
+    const t = now * 0.001;
 
-    // --- me: seated camera lock ---
+    COZY.tick(t);
+
+    /* --- me --- */
     if (mySeat !== null) {
       const s = SEATS[mySeat];
-      seatBlend = Math.min(1, seatBlend + dt * 3.2);
-      seatCam.lerp(new THREE.Vector3(s.x, s.eye, s.z), 0.16);
+      seatTarget.set(s.x, s.eye, s.z);
+      seatCam.lerp(seatTarget, K(0.16, dt));
       player.copy(seatCam);
-      // keep the seat's x/z authoritative once we've settled
-      if (seatBlend > 0.98) player.set(s.x, s.eye, s.z);
       seatRing.material.opacity = 0;
     } else {
-      // highlight whatever we could sit on
+      player.y = STAND_EYE;
       const n = nearestSeat();
       if (n >= 0) {
-        seatRing.position.set(SEATS[n].x, 0.06, SEATS[n].z);
-        seatRing.material.opacity = 0.28 + Math.sin(now * 0.005) * 0.1;
-      } else seatRing.material.opacity = 0;
+        seatRing.position.set(SEATS[n].x, 0.07, SEATS[n].z);
+        seatRing.material.opacity = 0.3 + Math.sin(t * 5) * 0.12;
+      } else {
+        seatRing.material.opacity = 0;
+      }
     }
 
-    // --- me: broadcast pose ~12Hz, only when it actually changed ---
-    poseAcc += dt;
-    if (connected && poseAcc > 0.08) {
+    /* --- broadcast my pose: ~15Hz when I move, plus a heartbeat --- */
+    poseAcc += dt; beatAcc += dt;
+    if (connected && poseAcc > 0.066) {
       poseAcc = 0;
-      const moved = Math.abs(player.x - lastSent.x) > 0.02 ||
-                    Math.abs(player.z - lastSent.z) > 0.02 ||
+      const moved = Math.abs(player.x - lastSent.x) > 0.015 ||
+                    Math.abs(player.z - lastSent.z) > 0.015 ||
                     Math.abs(cam.yaw - lastSent.yaw) > 0.02;
-      if (moved) {
-        send({ t: "pose", x: +player.x.toFixed(2), z: +player.z.toFixed(2), yaw: +cam.yaw.toFixed(2) });
+      if (moved || beatAcc > 0.5) {
+        beatAcc = 0;
+        send({
+          t: "pose",
+          x: +player.x.toFixed(2),
+          z: +player.z.toFixed(2),
+          yaw: +cam.yaw.toFixed(3)
+        });
         lastSent = { x: player.x, z: player.z, yaw: cam.yaw };
       }
     }
 
-    // --- me: if I'm driving, push the clock once a second ---
     tickAcc += dt;
     if (tickAcc > 1) {
       tickAcc = 0;
       if (activeEl && driver === myId) pushTick(!activeEl.paused);
-      if (connected) send({ t: "ping", c: now });   // keeps the skew honest + keeps the socket warm
+      if (connected) send({ t: "ping", c: now });
     }
 
-    // --- everyone else: interpolate, pose, decay bubbles ---
+    /* --- everyone else --- */
     for (const p of peers.values()) {
       const av = p.av;
 
       if (p.seat !== null && p.seat !== undefined) {
         const s = SEATS[p.seat];
-        av.position.x += (s.x - av.position.x) * 0.15;
-        av.position.z += (s.z - av.position.z) * 0.15;
-        av.position.y += (s.av - av.position.y) * 0.15;
-        // face the way the seat faces, plus a bit of their own head turn
-        const want = s.yaw + Math.PI;
-        av.rotation.y += shortest(av.rotation.y, want) * 0.15;
-        poseAvatar(av, true, dt, 0);
-      } else {
-        const px = av.position.x, pz = av.position.z;
-        av.position.x += (p.tx - px) * 0.18;
-        av.position.z += (p.tz - pz) * 0.18;
-        av.position.y += (0 - av.position.y) * 0.18;
-        // their yaw is a *look* direction; the avatar's forward is +z, so add PI
-        av.rotation.y += shortest(av.rotation.y, p.tyaw + Math.PI) * 0.18;
-        const speed = Math.hypot(av.position.x - px, av.position.z - pz) / Math.max(dt, 0.001);
-        poseAvatar(av, false, dt, speed);
+        av.position.x += (s.x - av.position.x) * K(0.15, dt);
+        av.position.z += (s.z - av.position.z) * K(0.15, dt);
+        av.position.y += (s.av - av.position.y) * K(0.15, dt);
+        p.bodyYaw += shortAngle(p.bodyYaw, s.yaw + Math.PI) * K(0.15, dt);
+        av.rotation.y = p.bodyYaw;
+        p.speed = 0;
+        poseAvatar(av, true, dt, 0, p.bodyYaw, p.tyaw, t);
+        continue;
       }
 
-      const b = av.userData.bubble;
-      if (b) {
-        b.userData.life -= dt;
-        if (b.userData.life < 1) b.material.opacity = Math.max(0, b.userData.life);
-        if (b.userData.life <= 0) { av.remove(b); av.userData.bubble = null; }
-      }
+      const px = av.position.x, pz = av.position.z;
+      av.position.x += (p.tx - px) * K(0.2, dt);
+      av.position.z += (p.tz - pz) * K(0.2, dt);
+      av.position.y += (0 - av.position.y) * K(0.2, dt);
+
+      const dx = av.position.x - px, dz = av.position.z - pz;
+      const inst = Math.hypot(dx, dz) / Math.max(dt, 0.001);
+      p.speed += (inst - p.speed) * K(0.25, dt);   // smooth it so the walk cycle isn't jittery
+
+      // face where you're WALKING when moving, where you're LOOKING when still.
+      // this is what makes them read as alive instead of sliding.
+      const target = p.speed > 0.3 ? Math.atan2(dx, dz) : (p.tyaw + Math.PI);
+      p.bodyYaw += shortAngle(p.bodyYaw, target) * K(p.speed > 0.3 ? 0.22 : 0.12, dt);
+      av.rotation.y = p.bodyYaw;
+
+      poseAvatar(av, false, dt, p.speed, p.bodyYaw, p.tyaw, t);
+    }
+
+    /* --- chat bubbles fade out --- */
+    for (const p of peers.values()) {
+      const b = p.av.userData.bubble;
+      if (!b) continue;
+      b.userData.life -= dt;
+      if (b.userData.life < 1) b.material.opacity = Math.max(0, b.userData.life);
+      if (b.userData.life <= 0) { p.av.remove(b); p.av.userData.bubble = null; }
     }
   }
 
-  function shortest(from, to) {
-    let d = (to - from) % (Math.PI * 2);
-    if (d > Math.PI) d -= Math.PI * 2;
-    if (d < -Math.PI) d += Math.PI * 2;
-    return d;
-  }
+  /* ---- the guard: if update() never fires, say so loudly ---- */
+  setTimeout(function () {
+    if (updateCalls === 0) {
+      loopWarn.style.display = "block";
+      console.error("[chillroom] NET.update(dt) is NOT being called from your frame loop.");
+    } else {
+      console.log("%c[chillroom] v2 running — " + updateCalls + " frames. T = chat, E = sit.",
+                  "color:#ffb870");
+    }
+  }, 3000);
 
   return {
-    update,
-    toggleSeat,
-    send,
-    get seated()  { return mySeat !== null; },
-    get chatting(){ return chatOpen; },
-    get id()      { return myId; }
+    update: update,
+    toggleSeat: toggleSeat,
+    send: send,
+    get seated()   { return mySeat !== null; },
+    get chatting() { return chatOpen; },
+    get id()       { return myId; }
   };
 })();
 
 /* ============================================================
-   THE TWO EDITS  —  down in your frame loop:
+   THE TWO FRAME-LOOP EDITS
 
-   1) change
-          const lock=arcade.active || NET.seated || NET.chatting;
-      to
-          const lock = arcade.active || NET.seated || NET.chatting;
+   Down in  function frame() , change:
 
-   2) change
-          drawScreen(t); drawWindow(dt); arcade.tick(dt);
-      to
-          drawScreen(t); drawWindow(dt); arcade.tick(dt); NET.update(dt);
+       const lock=arcade.active;
+   to
+       const lock=arcade.active || NET.seated || NET.chatting;
 
-   That's it. Nothing else in your file changes.
+   and change:
+
+       drawScreen(t); drawWindow(dt); arcade.tick(dt);
+   to
+       drawScreen(t); drawWindow(dt); arcade.tick(dt); NET.update(dt);
+
+   If you miss the second one, a red box will tell you so.
    ============================================================ */
     
     // ---------- controls ----------
